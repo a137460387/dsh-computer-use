@@ -1,0 +1,235 @@
+# dsh-computer-use 开发日志
+
+本文件记录提示词「零、前置自查任务」的三项自查结论。所有结论均基于
+`D:\code\Ai\fork\deepseek-harness` 源码（版本 0.1.2-alpha.1，2026 年 8 月同步基线），
+引用格式为 `文件:行号`。写任何业务代码之前必须先读本文件。
+
+## 自查 1：插件内调用大模型的标准 API
+
+**结论：DSH 提供统一的模型调用服务 `ctx.llm`（`LlmRuntime`），支持多模态；
+插件通过它调用用户已配置的模型路由，不需要也不允许自己管理 API Key。**
+
+### 1.1 统一接口
+
+- `ctx.llm` 是 `LlmRuntime`：adapter 注册表 + 可被 `llm/stream` waterfall 拦截的流式调用
+  （`packages/llm/llm/src/index.ts:326`、`:1050`）。
+- 插件侧调用入口：
+  - `ctx.llm.stream(options: GenerateOptions): AsyncIterable<StreamChunk>`（`index.ts:1050`）
+  - `ctx.llm.prepareCall(config: LlmCallConfig, signal?): Promise<PreparedLlmCall>`
+    （`index.ts:889`）——把「路由解析 + 能力校验」与「分派」绑定到同一个 adapter 代，
+    是 session-title-llm 之外需要能力预检时的推荐入口。
+- `GenerateOptions`（`packages/llm/llm/src/types.ts:393`）：
+  `{ provider, model, messages, system?, tools?, temperature?, maxTokens?, stop?, signal?, sessionId?, purpose? }`。
+  `purpose` 是封闭集合 `'compaction' | 'session-title'`（`types.ts:428`），
+  本插件的视觉辅助调用**不设置** `purpose`。
+
+### 1.2 多模态（图片 + 文本）
+
+- 消息内容块 `ContentBlockMap` 含 `image`（`packages/llm/llm/src/types.ts:99`）：
+  `ImageBlock { type: 'image', attachment: ImageAttachmentRef }`（`types.ts:71`）。
+- **图片是持久化附件引用，不是内联 base64**：必须先把字节存入附件服务
+  `ctx.attachments.saveImage({ data: Uint8Array, mediaType, name? })`
+  （`packages/attachment/attachment/src/index.ts:100`），拿到 `ImageAttachmentRef`
+  后放进 user message 的 content。
+- 目标路由不接受图片时，`LlmRuntime` 自动把图片投影为占位文本
+  （`projectImagesForTextModel`，`index.ts:995-1001`）；路由的模态能力来自 adapter
+  `resolveModel` 返回的 `inputModalities`。
+
+### 1.3 现成的辅助调用先例
+
+`packages/session/session-title-llm/src/index.ts:229-294` 是官方「旁路模型调用」模板：
+
+1. `createUserMessage({ content, source: { kind: 'plugin', plugin: '<name>' } })` 构造消息；
+2. `deadline(signal, timeoutMs, CODE)` 生成带超时的信号（`@deepseek-ai/dsh-timeout`）；
+3. `for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)`
+   用 `BlockAssembler` 汇聚；
+4. 检查 `assembler.finish`（`stop | error | aborted | max-tokens | tool-calls`）
+   后读取 `assembler.blocks()` 的 text 块。
+
+### 1.4 路由解析与用户已配置模型
+
+- `GenerateOptions.provider` 是 **provider 路由名**。本机部署的路由来自
+  `$DSH_HOME/settings.yaml` 的 `llm-pi-ai.providers` 段：段名即路由名
+  （`packages/bundle/base/cordis.patch.yml:100-108` 注释说明 settings 段驱动
+  pi-ai adapter 的路由注册；`agent-default-model` 行使用 `provider: tokenrhythm`
+  证实路由名 = settings 键，`packages/bundle/base/cordis.patch.yml:75-79`）。
+- 本机实测（`C:\Users\luoguangyu\.dsh\settings.yaml`）：
+  - `tokenrhythm/qwen3.8-max` 声明 `input: [text, image]` ——可作主力视觉模型；
+  - `tokenrhythm/glm-5.3-flash` 声明 `input: [text, image]` ——可作变化检测模型；
+  - `agent-default-model: { provider: tokenrhythm, model: qwen3.8-max }`。
+- 因此 Config 必须同时携带 **provider + model** 两个字段（成对出现，
+  session-title-llm 同样要求「provider and model must be supplied together」，
+  `packages/session/session-title-llm/src/index.ts:127-131`）。
+
+### 1.5 API Key
+
+插件**禁止**自管 API Key、禁止直接发 HTTP 请求。Key 由拥有该路由的 adapter
+在每次请求时从 credentials/settings 解析（`packages/bundle/base/cordis.patch.yml:93-98`
+credentials 行、`:496-501` llm-deepseek 行注释）。插件只需调用 `ctx.llm`。
+
+### 1.6 本插件的视觉调用代码形态（Phase 2 实现依据）
+
+```ts
+import { createUserMessage, BlockAssembler, deepFreeze } from '@deepseek-ai/dsh-llm'
+
+const prepared = await ctx.llm.prepareCall(
+  { provider: config.visionProvider, model: config.visionModel },
+  signal,
+)
+const [ref] = await ctx.attachments.saveImages([{
+  data: jpegBytes, mediaType: 'image/jpeg', name: `cu-shot-${seq}.jpg`,
+}])
+const messages = [createUserMessage({
+  content: [
+    { type: 'text', text: analysisPrompt },
+    { type: 'image', attachment: ref },
+  ],
+  source: { kind: 'plugin', plugin: 'dsh-computer-use' },
+})]
+const assembler = new BlockAssembler()
+for await (const chunk of prepared.stream(deepFreeze({
+  provider: prepared.config.provider,
+  model: prepared.config.model,
+  messages,
+  system: visionSystemPrompt,
+  maxTokens: config.visionMaxOutputTokens,
+  signal,
+}))) assembler.push(chunk)
+// 检查 assembler.finish 后解析 blocks() 中的 JSON 指令
+```
+
+## 自查 2：DSH 对 MCP 协议的原生支持
+
+**结论：DSH 内置 MCP Client（`@deepseek-ai/dsh-mcp-client`），可在
+cordis.patch.yml 中原生挂载 stdio MCP Server；但原生挂载不满足本插件的安全
+架构，因此本插件自建 MCP Client——线缆协议仍是标准 MCP JSON-RPC 2.0。**
+
+### 2.1 内置能力（若选择原生挂载的写法）
+
+`packages/mcp/mcp-client/README.md:34-53` 给出原生挂载形态：
+
+```yaml
+- id: mcp-cu
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: cu
+    transport: stdio
+    command: dsh-cu-server
+    args: []
+```
+
+工具以 `mcp__cu__<tool>` 名注册进 `ctx.tools`；stdio 子进程环境经
+`scrubbedParentEnv()` 清洗（`packages/mcp/mcp-client/src/transport.ts:21-23`）；
+自带重连、工具代同步、超时配置（README:55-66）。
+
+### 2.2 为什么不采用原生挂载
+
+1. **安全层被绕过**：原生挂载把 Python Server 的工具直接暴露给模型，
+   本插件的分级授权（ctx.approval）、审计日志、熔断、危险内容拦截、
+   ObservationId 新鲜度校验都无从介入。
+2. **进程生命周期不归 ctx.subprocess**：`dsh-mcp-client` 的 stdio 传输用
+   MCP SDK 的 `StdioClientTransport` 自行 spawn
+   （`packages/mcp/mcp-client/src/transport.ts:31-40`，README:133
+   「The MCP SDK owns the actual spawn」），与提示词第七节
+   「禁止直接/间接使用 child_process，必须使用 ctx.subprocess」冲突。
+3. **工具形态不符**：提示词第九节要求自定义工具名、`basedOnObservationId`
+   参数与 UI render intent，原生桥接的 `mcp__*` 工具无法定制。
+
+### 2.3 采纳方案：自建 Client + 标准 MCP 线缆协议
+
+- 复用官方 `@modelcontextprotocol/sdk`（harness 钉住 `^1.12.0`，
+  `packages/mcp/mcp-client/package.json:45`）的 `Client` 与协议类型，
+  避免手写 JSON-RPC 分帧/校验（符合仓库「优先维护中的依赖」纪律）。
+- 传输层自实现 `Transport` 接口：写入 `ctx.subprocess.spawn()` 句柄的
+  `stdin`、读取其 `stdout`（换行分隔 JSON）。进程生命周期（spawn/terminate/
+  waitForExit/健康检查/清理）全部归 `ctx.subprocess`。
+- 每次 `tools/call` 前在 Node 侧编织安全层；Python 端保持「标准 MCP Server」
+  身份（initialize 响应携带版本号用于握手校验）。
+
+## 自查 3：cordis.patch.yml 的编写规范
+
+**结论：外部插件与内置 bundle 的 patch 在 schema 上无差别；外部包的行以
+npm 包名引用自身模块。完整模板见本仓库根目录 `cordis.patch.yml`。**
+
+### 3.1 Schema（实证自 `packages/bundle/base/cordis.patch.yml` 与
+`packages/bundle/web-app/cordis.patch.yml`）
+
+顶层是 YAML 数组，条目三种形态：
+
+1. `- insert:` + 行列表——新增行。行字段：`id`（稳定标识）、`name`
+   （包名或 `包名/子路径`）、可选 `inject: [services]`、可选 `config: {}`、
+   可选 `disabled`。
+2. `- id: <已存在行的 id>` + `config:` ——覆盖既有行；**config 整体替换，
+   不是深合并**，必须重述该行需要的全部键（`docs/user/develop/basic/publish.md:123-127`）。
+3. `- id: <行 id>` + `disabled: true|false` ——启停既有行。
+
+config 值支持 `!!js` 表达式，在 Loader 注入上下文中求值：可用 `process.env.*`、
+`ctx.<已注入服务>.*`、`dshHomePath('...')`（`packages/boot/app-boot/src/index.ts:785`
+在 boot 根提供 `dshHomePath`；base 用例行：`packages/bundle/base/cordis.patch.yml:113`）。
+
+### 3.2 层叠顺序与外部插件解析
+
+- 层序：profile 的 `dsh.profile.bundles` 逐个（`@deepseek-ai/dsh-base` 最先，
+  其后按安装顺序），然后 profile 自身 `cordis.patch.yml`，再 `$DSH_HOME/cordis.patch.yml`，
+  最后 `--patch` 覆盖层（`docs/user/develop/basic/publish.md:114-122`）。
+- 本插件安装在 `dsh-web-app` 之后，因此可以按 id 覆盖 base/web-app 的行；
+  用户也可以在其 profile 层覆盖本插件的行——所以把「用户大概率保留的取值」
+  写进 patch，其余放 schema 默认值（`publish.md:126`）。
+- 模块解析：in-box 包名从 dsh 安装自身解析；外部包由 `dsh plugin add`
+  经 pnpm 安装进 profile 目录（`publish.md:128`、`:77-101`）。
+  dsh 启动时修复模块回退（module fallback），把 dsh 安装依赖闭包
+  （**含 peerDependencies**）镜像进 `$DSH_HOME/profiles/node_modules` 与
+  profile 目录（`packages/boot/app-boot/src/profile.ts:497-592`，
+  `:508-511` 注释明确 Service Definition 包作为 peer 也会被镜像，
+  供外部插件直接 import）。
+
+### 3.3 依赖声明策略（重要工程结论）
+
+- `@deepseek-ai/*` 一律声明为 **peerDependencies**（harness 自身包的惯例：
+  「@deepseek-ai/cordis 是每个 harness 包的 peerDependency(+dev)」），
+  运行时经模块回退解析到当前 dsh 安装的副本，保证与宿主同版本、
+  服务实例单一（`instanceof`/注册表共享正确）。
+- 注意：**这些包的 npm 已发布版本（0.0.1-rc.1）远旧于本 fork（0.1.2-alpha.1）**，
+  实测 `npm view @deepseek-ai/dsh-llm version` = `0.0.1-rc.1`。
+  因此本机开发安装不能从 npm 拉取，`package.json` 携带 `pnpm.overrides`
+  把 peer/dev 依赖 `link:` 到 `../deepseek-harness` 的源码目录（仅在本仓库
+  作为根项目安装时生效，不影响消费者）。
+- **// TODO: 需确认**——`link:` 安装形态下，插件入口经 Loader 以 profile 为
+  parent URL 载入后，Node 对裸包名的解析基址是插件源码目录的 realpath；
+  若 profile 的 `node_modules` 不在其解析路径上，则须在本仓库本地
+  `pnpm install`（overrides 已备好）提供解析。Phase 3 安装验证时实测钉死。
+- 第三方依赖 `@modelcontextprotocol/sdk` 声明为普通 `dependencies`，
+  由 `dsh plugin add` 时 pnpm 安装（与 peer 不同，它不在 dsh 安装闭包中）。
+
+### 3.4 本插件的 patch 模板
+
+见根目录 `cordis.patch.yml`：单条 `insert`，行 id `computer-use`，
+`name: dsh-computer-use`，config 携带视觉路由与全部部署可调参数
+（与 `src/config.ts` 的 Schemastery schema 逐键对应）。
+
+## 其他已核实的集成事实（供 Phase 2 直接引用）
+
+- **ctx.subprocess**（`packages/subprocess/subprocess/src/index.ts:102-140`）：
+  `spawn(spec)` 立即返回活句柄；spec 无默认值，必须显式给出
+  `argv/cwd/stdio/graceMs`（`types.ts:75-104`）；句柄提供
+  `stdin?: Writable`、`stdout?: Readable`、`done: Promise<SubprocessOutcome>`、
+  `terminate()`（SIGTERM→grace→SIGKILL，Windows taskkill /T 树杀）、
+  `waitForExit(signal?)`（`types.ts:159-194`）。`scrubbedParentEnv()`
+  去掉 `KEY|PASSWORD|SECRET|TOKEN` 与 `DSH_*` 环境名（`index.ts:44-66`）。
+- **ctx.approval**（`packages/interaction/user-approval/src/index.ts:222-241`）：
+  `request(req)` 返回 `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`；
+  仅 `allowed-once` 是授权；无「记住授权」语义；**必须在开放 turn 内调用**
+  （`index.ts:224-230`）；审计事件 `approval/asked`/`approval/decided` 自动入会话日志。
+  自定义 Answerer = `ctx.on('approval/request', (req, next) => ...)` waterfall
+  监听器（`packages/interaction/user-approval/src/types.ts:85-90`），
+  返回结果认领请求，调用 `next()` 委托。
+- **工具注册**（`docs/cookbook/adding-a-tool.md:9-38`、
+  `packages/core/tools/src/index.ts:1036`）：`ctx.tools.register(defineTool({...}))`
+  返回 disposer；注册即效果（fiber dispose 自动注销）；
+  `execute(args, exec)` 中 `exec.signal` 必须尊重。
+- **宿主平面工具对 web 会话可见**：`dsh-web-app` 把 agent 平面工具行在宿主层
+  `disabled`，改由每个会话挂载的 agent preset 提供
+  （`packages/bundle/web-app/cordis.patch.yml:364-494`）；宿主平面注册的工具
+  进入全局层，对所有会话可见（本会话的 `cordis_*` 工具即宿主层先例）。
+  本插件的 `computer-use` 行属于宿主平面（进程级能力，类似 shell）。
+- **平台守卫**：Linux/无头环境在 `apply` 阶段显式抛错拒绝加载（提示词第十一节）。

@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (binary distribution stays out of git; see DEVELOPMENT_LOG.md)
+bin/
+dist/
+lib/
+*.tsbuildinfo
+
+# Test/tooling residue
+coverage/
+.vitest-cache/
+
+# OS noise
+.DS_Store
+Thumbs.db

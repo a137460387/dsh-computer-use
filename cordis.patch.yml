@@ -1,0 +1,55 @@
+# The dsh-computer-use bundle patch: the desktop Computer Use capability as
+# one host-plane row. Applied after @deepseek-ai/dsh-base and
+# @deepseek-ai/dsh-web-app (installation order), before the profile's own
+# cordis.patch.yml, the home-level one, and any --patch overlay — a later
+# layer can override this row by id.
+#
+# A patch replaces the targeted row's whole `config`, so a deployment
+# overriding any field below must restate every key it needs.
+#
+# Config keys correspond one-to-one to the Schemastery schema in
+# src/config.ts; schema defaults (danger patterns, allowed apps, subprocess
+# and audit tunables) are omitted here and stay editable from any later layer.
+#
+# Model routes are provider+model pairs exactly as `ctx.llm` resolves them:
+# provider is a registered adapter route — an `llm-pi-ai.providers` settings
+# key in this deployment — and model an id that route advertises with image
+# input. Point both pairs at your own routes in a profile or home patch.
+
+- insert:
+    - id: computer-use
+      name: dsh-computer-use
+      config:
+        # ── vision model routes ────────────────────────────────────────────
+        visionProvider: tokenrhythm
+        visionModel: qwen3.8-max
+        changeDetectionProvider: tokenrhythm
+        changeDetectionModel: glm-5.3-flash
+        visionMaxOutputTokens: 2048
+        visionTimeoutMs: 120000
+
+        # ── agent loop ─────────────────────────────────────────────────────
+        maxSteps: 30
+        stepDelayMs: 1500
+        screenshotMaxWidth: 1280
+        screenshotQuality: 75
+
+        # ── observation freshness and breaker ──────────────────────────────
+        observationTtlMs: 30000
+        consecutiveFailureCount: 3
+        similarityThreshold: 5
+
+        # ── sidecar transport ──────────────────────────────────────────────
+        pythonCommand: python
+        # DSH_CU_MODE forces the launch mode; unset (undefined) auto-detects
+        # bin/dsh-cu-server (prod) and falls back to the Python source (dev).
+        serverMode: !!js process.env.DSH_CU_MODE
+        processGraceMs: 5000
+        rpcTimeoutMs: 60000
+        healthCheckIntervalMs: 30000
+        healthCheckTimeoutMs: 5000
+
+        # ── audit ──────────────────────────────────────────────────────────
+        auditLogPath: !!js dshHomePath('logs/dsh-cu-audit.log')
+        screenshotArchivePath: !!js dshHomePath('logs/dsh-cu-screenshots')
+        auditRetentionDays: 7
