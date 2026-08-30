@@ -233,3 +233,61 @@ config 值支持 `!!js` 表达式，在 Loader 注入上下文中求值：可用
   进入全局层，对所有会话可见（本会话的 `cordis_*` 工具即宿主层先例）。
   本插件的 `computer-use` 行属于宿主平面（进程级能力，类似 shell）。
 - **平台守卫**：Linux/无头环境在 `apply` 阶段显式抛错拒绝加载（提示词第十一节）。
+
+## Phase 2 实现结论与实测发现（2026 年，第 2 阶段）
+
+### P2-1：严格类型检查通过（真实链接，非猜测）
+
+`pnpm install` 借 `pnpm.overrides` 的 `link:` 把 11 个 `@deepseek-ai/*`
+peer 全部链到 `../deepseek-harness` 源码目录后，`npx tsc --noEmit`
+（strict 全开）零错误。期间钉死的三个真实契约：
+
+1. **工具 schema DSL 没有 `required: [...]` 数组形态**——必填性在每个属性上
+   用 `required: true` 表达（`packages/core/tools/src/schema.ts:96-106` 的
+   `ParameterPropertySpec`）；输出对象节点必须声明 `additionalProperties`。
+2. **Cordis `Service` 子类构造器是 `constructor(ctx)`**——服务名在
+   Definition 层 `super(ctx, 'computerUse')` 钉死，Provider 子类只
+   `super(ctx)`；`ApprovalService(ctx, config)` 的形态是同型先例。
+3. **MCP SDK `client.callTool` 不带 resultSchema 时返回内容是无类型的**——
+   Provider 用结构化局部形状 `McpToolResultShape` 读取
+   `structuredContent`/首个 text 块，下游再逐一校验。
+
+### P2-2：实测发现——本部署运行在 Windows 会话 0（关键部署约束）
+
+本机 `dsh web` 以**后台服务形态**运行（`query session` 实测：本进程在
+session 0「services/Disc」，交互桌面在 session 1「console/Active」）。
+会话 0 进程对交互桌面是结构性不可达的，实测三连证：
+
+- `EnumDisplayMonitors` 只报告 1024×768 回退虚拟屏（名为 `WinDisc`）；
+- `PIL.ImageGrab.grab()` 抛 `OSError: screen grab failed`（BitBlt 无权抓交互桌面）；
+- `GetForegroundWindow` 返回空（会话 0 无前台窗口）。
+
+处置（已实现）：
+
+- Python sidecar 启动即做交互会话断言（`core/display.py`
+  `assert_interactive_session`，kernel32 `ProcessIdToSessionId` 对比
+  `WTSGetActiveConsoleSessionId`），不匹配即拒绝启动并给出补救指引；
+- Node 侧 MCP 握手失败时把 sidecar stderr 尾部并入错误消息，
+  该拒绝会原样浮到第一次工具调用；
+- **验收推论**：真实屏幕控制的功能验证（截图/点击/150% 缩放映射）必须在
+  **交互会话里启动的 dsh 实例**上执行——例如在桌面终端里
+  `pnpm dsh --profile web`（换端口）或 headless 跑一条任务；本会话
+  （服务会话）只能验证协议面。
+- 不做 CreateProcessAsUser 之类跨会话注入：权限升级面，超出插件边界。
+
+### P2-3：stdio 冒烟实测（tests/dev-mcp-smoke.py，本会话内跑通协议面）
+
+在会话 0 内已验证通过：initialize 握手（协议版本回显 + `serverInfo`
+版本号）、`tools/list` 七工具面、ObservationId 未知/过期拒绝的明确错误、
+`get_foreground_window` 形状、`ping`、干净退出（exit 0）。
+截图与点击两条在会话 0 内被交互会话守卫拦在启动前——这是预期行为，
+真实链路待 Phase 3 在交互会话中复跑同一脚本钉死。
+
+### P2-4：审批分层的标记约定（插件内部契约）
+
+`ctx.approval` 的请求只携带 `toolName/callId/reason`，Answerer 无法看到
+参数。本插件约定在 `reason` 前缀嵌标记：`[dsh-computer-use tier=medium]`
+可被会话级窗口/计数器自动放行；`[dsh-computer-use tier=high]` 一律
+`next()` 委托交互 Answerer（无交互 Answerer 时按 approval 缝语义
+fail-closed 为 unavailable）。两端都在本插件内，契约文档化于
+`src/answerer.ts`。

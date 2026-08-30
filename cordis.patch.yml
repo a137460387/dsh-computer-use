@@ -11,45 +11,44 @@
 # src/config.ts; schema defaults (danger patterns, allowed apps, subprocess
 # and audit tunables) are omitted here and stay editable from any later layer.
 #
-# Model routes are provider+model pairs exactly as `ctx.llm` resolves them:
-# provider is a registered adapter route — an `llm-pi-ai.providers` settings
-# key in this deployment — and model an id that route advertises with image
-# input. Point both pairs at your own routes in a profile or home patch.
+# Vision routes ship UNCONFIGURED: the four route fields default to the empty
+# string and the plugin refuses activation with guidance until a deployment
+# names its own routes. Configure them in the profile's cordis.patch.yml or
+# the home-level $DSH_HOME/cordis.patch.yml (later layers override this row
+# by id — restate every key you need, a patch replaces the whole config):
+#
+#   - id: computer-use
+#     config:
+#       visionProvider: <your provider route>        # e.g. an llm-pi-ai.providers settings key
+#       visionModel: <vision-capable model id>       # must advertise image input
+#       changeDetectionProvider: <your provider route>
+#       changeDetectionModel: <cheap model id>
+#       visionMaxOutputTokens: 2048
+#       visionTimeoutMs: 120000
+#       maxSteps: 30
+#       stepDelayMs: 1500
+#       screenshotMaxWidth: 1280
+#       screenshotQuality: 75
+#       observationTtlMs: 30000
+#       consecutiveFailureCount: 3
+#       similarityThreshold: 5
+#       pythonCommand: python
+#       serverMode: !!js process.env.DSH_CU_MODE
+#       processGraceMs: 5000
+#       rpcTimeoutMs: 60000
+#       healthCheckIntervalMs: 30000
+#       healthCheckTimeoutMs: 5000
+#       autoApprovalWindowMs: 300000
+#       autoApprovalMaxGrants: 50
+#       auditLogPath: !!js dshHomePath('logs/dsh-cu-audit.log')
+#       screenshotArchivePath: !!js dshHomePath('logs/dsh-cu-screenshots')
+#       auditRetentionDays: 7
 
 - insert:
     - id: computer-use
       name: dsh-computer-use
       config:
-        # ── vision model routes ────────────────────────────────────────────
-        visionProvider: tokenrhythm
-        visionModel: qwen3.8-max
-        changeDetectionProvider: tokenrhythm
-        changeDetectionModel: glm-5.3-flash
-        visionMaxOutputTokens: 2048
-        visionTimeoutMs: 120000
-
-        # ── agent loop ─────────────────────────────────────────────────────
-        maxSteps: 30
-        stepDelayMs: 1500
-        screenshotMaxWidth: 1280
-        screenshotQuality: 75
-
-        # ── observation freshness and breaker ──────────────────────────────
-        observationTtlMs: 30000
-        consecutiveFailureCount: 3
-        similarityThreshold: 5
-
-        # ── sidecar transport ──────────────────────────────────────────────
-        pythonCommand: python
-        # DSH_CU_MODE forces the launch mode; unset (undefined) auto-detects
-        # bin/dsh-cu-server (prod) and falls back to the Python source (dev).
-        serverMode: !!js process.env.DSH_CU_MODE
-        processGraceMs: 5000
-        rpcTimeoutMs: 60000
-        healthCheckIntervalMs: 30000
-        healthCheckTimeoutMs: 5000
-
-        # ── audit ──────────────────────────────────────────────────────────
+        # Paths are deployment-local facts the schema cannot default; the
+        # model routes above stay empty until a later layer configures them.
         auditLogPath: !!js dshHomePath('logs/dsh-cu-audit.log')
         screenshotArchivePath: !!js dshHomePath('logs/dsh-cu-screenshots')
-        auditRetentionDays: 7

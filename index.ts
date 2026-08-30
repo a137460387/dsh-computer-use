@@ -10,7 +10,21 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { Config, type ComputerUseConfig } from './src/config.ts'
+import { registerAnswerer } from './src/answerer.ts'
+import type { ComputerUseConfig } from './src/config.ts'
+import McpComputerUseProvider from './src/provider-mcp/index.ts'
+import { createAuditor } from './src/security/auditor.ts'
+import { FailureDetector } from './src/security/circuit-breaker.ts'
+import { DangerFilter } from './src/security/danger-filter.ts'
+import { registerClickAt } from './src/tools/click-at.ts'
+import { registerGetDisplayInfo } from './src/tools/get-display-info.ts'
+import { registerHotkey } from './src/tools/hotkey.ts'
+import { registerScreenShot } from './src/tools/screen-shot.ts'
+import type { ToolDeps } from './src/tools/shared.ts'
+import { registerScroll } from './src/tools/scroll.ts'
+import { registerTypeText } from './src/tools/type-text.ts'
+import { ChangeDetector } from './src/vision/change-detector.ts'
+import { createVisionProvider } from './src/vision/vision-provider.ts'
 
 export { Config } from './src/config.ts'
 export type { ComputerUseConfig } from './src/config.ts'
@@ -45,29 +59,61 @@ function assertPlatformSupported(): void {
 }
 
 /**
- * Mount the computer-use capability.
- *
- * Phase 2 completes the wiring this entry point owns:
- * - `src/provider-mcp` provides `ctx.computerUse` (sidecar spawn through
- *   `ctx.subprocess`, standard MCP JSON-RPC over its stdio, version
- *   handshake, health check, serialized execution);
- * - `src/tools` registers `screen_shot`, `get_display_info`, `click_at`,
- *   `type_text`, `scroll`, `hotkey` on `ctx.tools`;
- * - `src/security` attaches the auditor, danger filter, and breaker;
- * - `src/vision` mounts the VisionProvider over `ctx.llm`/`ctx.attachments`;
- * - `src/answerer` registers the session-scoped approval answerer.
+ * Refuse activation while the model routes are unconfigured. The bundle ships
+ * with empty route fields on purpose; the error carries the exact patch a
+ * deployment adds to configure them.
+ * @param config - validated configuration with possibly-empty routes.
+ */
+function assertRoutesConfigured(config: ComputerUseConfig): void {
+  const missing: string[] = []
+  if (config.visionProvider === '') missing.push('visionProvider')
+  if (config.visionModel === '') missing.push('visionModel')
+  if (config.changeDetectionProvider === '') missing.push('changeDetectionProvider')
+  if (config.changeDetectionModel === '') missing.push('changeDetectionModel')
+  if (missing.length === 0) return
+  throw new Error(
+    `dsh-computer-use: model routes are not configured (${missing.join(', ')} empty). `
+    + 'Configure them in the profile cordis.patch.yml or $DSH_HOME/cordis.patch.yml:\n'
+    + '  - id: computer-use\n'
+    + '    config:\n'
+    + '      visionProvider: <provider route>          # e.g. an llm-pi-ai.providers settings key\n'
+    + '      visionModel: <vision-capable model id>    # must advertise image input\n'
+    + '      changeDetectionProvider: <provider route>\n'
+    + '      changeDetectionModel: <cheap model id>',
+  )
+}
+
+/**
+ * Mount the computer-use capability: security layer, vision bridge, approval
+ * answerer, the MCP-backed service provider, and the six model-facing tools.
+ * The sidecar itself starts lazily at first service use, so mounting stays
+ * cheap and binary resolution errors surface where they belong — first call.
  * @param ctx - host context carrying the injected services.
  * @param config - validated {@link ComputerUseConfig}.
  */
 export function apply(ctx: Context, config: ComputerUseConfig): void {
   assertPlatformSupported()
-  // TODO(Phase 2): mount provider-mcp here; it provides `computerUse` and
-  // owns the sidecar process tree for this fiber's lifetime.
-  // TODO(Phase 2): register the six model-facing tools after the service.
-  // TODO(Phase 2): attach security (auditor/danger-filter/breaker), the
-  // vision bridge, and the approval answerer.
+  assertRoutesConfigured(config)
+
+  const dangerFilter = new DangerFilter(config.dangerPatterns)
+  const breaker = new FailureDetector(config.consecutiveFailureCount, config.similarityThreshold)
+  const auditor = createAuditor(ctx, config)
+  const vision = createVisionProvider(ctx, config)
+  const changeDetector = new ChangeDetector(vision, config.similarityThreshold)
+  const deps: ToolDeps = { config, dangerFilter, breaker, auditor, changeDetector }
+
+  registerAnswerer(ctx, config)
+  void ctx.plugin(McpComputerUseProvider, config)
+
+  registerScreenShot(ctx, deps)
+  registerGetDisplayInfo(ctx, deps)
+  registerClickAt(ctx, deps)
+  registerTypeText(ctx, deps)
+  registerScroll(ctx, deps)
+  registerHotkey(ctx, deps)
+
   ctx.logger.info(
-    `dsh-computer-use: skeleton mounted on ${process.platform} `
+    `dsh-computer-use: mounted on ${process.platform} `
     + `(vision route ${config.visionProvider}/${config.visionModel}, `
     + `change-detection route ${config.changeDetectionProvider}/${config.changeDetectionModel})`,
   )

@@ -9,7 +9,7 @@
 import z from '@deepseek-ai/schemastery'
 
 /** Maximum delay accepted by the harness timer service, mirrored for timer-bounded fields. */
-const MAX_TIMER_DELAY_MS = 2_147_483_647
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /**
  * The computer-use plugin configuration.
@@ -17,17 +17,18 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
  * Model routes are provider+model pairs exactly as `ctx.llm` resolves them:
  * the provider is a registered adapter route (a `settings.yaml`
  * `llm-pi-ai.providers` key in this deployment), the model an id that route
- * advertises. Both fields of a pair are required together; there is no
- * ambient "current model" lookup for auxiliary calls.
+ * advertises. The bundle ships UNCONFIGURED: every route field defaults to
+ * the empty string and the plugin refuses activation with configuration
+ * guidance until a deployment names its own routes in a later patch layer.
  */
 export interface ComputerUseConfig {
-  /** Provider route owning the primary vision model. */
+  /** Provider route owning the primary vision model; empty until configured. */
   readonly visionProvider: string
-  /** Model id that analyzes screenshots and emits coordinates. */
+  /** Model id that analyzes screenshots and emits coordinates; empty until configured. */
   readonly visionModel: string
-  /** Provider route owning the change-detection model. */
+  /** Provider route owning the change-detection model; empty until configured. */
   readonly changeDetectionProvider: string
-  /** Cheap model id that decides whether the screen changed after an action. */
+  /** Cheap model id that decides whether the screen changed; empty until configured. */
   readonly changeDetectionModel: string
   /** Output-token cap for one vision analysis call. */
   readonly visionMaxOutputTokens: number
@@ -66,6 +67,10 @@ export interface ComputerUseConfig {
   readonly healthCheckIntervalMs: number
   /** Health-ping response deadline in milliseconds. */
   readonly healthCheckTimeoutMs: number
+  /** Answerer's auto-approval window in milliseconds for medium-risk actions. */
+  readonly autoApprovalWindowMs: number
+  /** Answerer's auto-approval grant ceiling within one window. */
+  readonly autoApprovalMaxGrants: number
   /** Append-only audit log path under the Harness home. */
   readonly auditLogPath: string
   /** Screenshot archive directory, stored apart from breaker hash fingerprints. */
@@ -78,12 +83,14 @@ export interface ComputerUseConfig {
  * Loader schema for {@link ComputerUseConfig}. Deployment-specific values the
  * bundle patch states live beside it; everything with a sensible universal
  * default carries one here, so a user override replaces only what it names.
+ * The four route fields default empty on purpose: the plugin fails loud with
+ * configuration guidance instead of riding an arbitrary route.
  */
 export const Config: z<ComputerUseConfig> = z.object({
-  visionProvider: z.string().required(),
-  visionModel: z.string().required(),
-  changeDetectionProvider: z.string().required(),
-  changeDetectionModel: z.string().required(),
+  visionProvider: z.string().default(''),
+  visionModel: z.string().default(''),
+  changeDetectionProvider: z.string().default(''),
+  changeDetectionModel: z.string().default(''),
   visionMaxOutputTokens: z.number().step(1).min(1).default(2048),
   visionTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(120_000),
   maxSteps: z.number().step(1).min(1).default(30),
@@ -112,6 +119,8 @@ export const Config: z<ComputerUseConfig> = z.object({
     '\\bdd\\b.*\\bof=/dev/',
   ]),
   allowedApps: z.array(String).default([]),
+  autoApprovalWindowMs: z.number().step(1).min(1000).max(MAX_TIMER_DELAY_MS).default(300_000),
+  autoApprovalMaxGrants: z.number().step(1).min(1).default(50),
   pythonCommand: z.string().default('python'),
   serverMode: z.union(['dev', 'prod'] as const),
   processGraceMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(5000),

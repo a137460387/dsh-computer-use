@@ -1,0 +1,7 @@
+# Runtime dependencies for the dev-mode sidecar (`python src-python/main.py`).
+# The production single-file binary (scripts/build-python.py) bundles these.
+pyautogui>=0.9.54
+pillow>=10.0.0
+# macOS display scale factors and foreground application facts.
+pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'
+pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'

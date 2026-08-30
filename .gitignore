@@ -11,6 +11,10 @@ lib/
 coverage/
 .vitest-cache/
 
+# Python residue
+__pycache__/
+*.pyc
+
 # OS noise
 .DS_Store
 Thumbs.db

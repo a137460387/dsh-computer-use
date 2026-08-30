@@ -75,6 +75,11 @@ export interface ScreenShot {
   readonly width: number
   /** Encoded height in pixels — the coordinate basis for VLM output. */
   readonly height: number
+  /**
+   * 64-bit difference hash (16 hex chars) of the frame, the breaker's
+   * change fingerprint; screenshots archive separately from it.
+   */
+  readonly dhash: string
   /** Capture timestamp, milliseconds since the Unix epoch. */
   readonly capturedAtMs: number
 }
@@ -144,8 +149,12 @@ export type ComputerUseActionType =
 export interface BeforeActionEvent {
   /** The action about to run. */
   readonly action: ComputerUseActionType
+  /** Session the action belongs to, when the consumer knows it. */
+  readonly sessionId?: Branded<'SessionId'>
   /** Observation the action bases on, when it has one. */
   readonly observationId?: ObservationId
+  /** Sanitized action summary (coordinates, direction, keys, char count). */
+  readonly detail?: string
   /** Event timestamp, milliseconds since the Unix epoch. */
   readonly atMs: number
 }
@@ -154,12 +163,16 @@ export interface BeforeActionEvent {
 export interface AfterActionEvent {
   /** The action that ran. */
   readonly action: ComputerUseActionType
+  /** Session the action belonged to, when the consumer knows it. */
+  readonly sessionId?: Branded<'SessionId'>
   /** Sidecar outcome. */
   readonly success: boolean
   /** Sidecar-side execution time in milliseconds. */
   readonly durationMs: number
   /** Observation the action based on, when it had one. */
   readonly observationId?: ObservationId
+  /** Sanitized action summary (coordinates, direction, keys, char count). */
+  readonly detail?: string
   /** Perceptual hash of the frame before the action, when the auditor computed one. */
   readonly beforeHash?: string
   /** Perceptual hash of the frame after the action, when the auditor computed one. */
@@ -279,6 +292,12 @@ export abstract class ComputerUseRuntime extends Service {
    * @returns the cached screenshot, or undefined once it expired.
    */
   abstract getObservation(observationId: ObservationId): Promise<ScreenShot | undefined>
+
+  /**
+   * Name of the foreground window's owning process, for whitelist policy.
+   * @returns the foreground process name (basename, no path).
+   */
+  abstract getForegroundWindow(): Promise<string>
 }
 
 export default ComputerUseRuntime
