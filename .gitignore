@@ -19,3 +19,11 @@ __pycache__/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Credential/secret file guard
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.local
