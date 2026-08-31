@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { consultAnswerer } from '../src/answerer.ts'
+import { consultAnswerer, describeAnswererQuota } from '../src/answerer.ts'
 import { testConfig } from './helpers.ts'
 
 afterEach(() => { vi.useRealTimers() })
@@ -55,5 +55,52 @@ describe('consultAnswerer', () => {
 
     vi.advanceTimersByTime(1500)
     expect(consultAnswerer(config, id, 'medium')).toBe('auto')
+  })
+})
+
+describe('describeAnswererQuota', () => {
+  it('reports a fresh quota for a session without grant history', () => {
+    const snapshot = describeAnswererQuota(testConfig(), session())
+    expect(snapshot).toMatchObject({ state: 'fresh', grantsUsed: 0, grantCeiling: 50, windowMs: 300_000 })
+    expect(snapshot.windowRemainingMs).toBeUndefined()
+  })
+
+  it('reports an active window with grants used, without consuming quota', () => {
+    const config = testConfig({ autoApprovalMaxGrants: 5 })
+    const id = session()
+    expect(consultAnswerer(config, id, 'medium')).toBe('auto')
+
+    const snapshot = describeAnswererQuota(config, id)
+    expect(snapshot.state).toBe('active')
+    expect(snapshot.grantsUsed).toBe(1)
+    expect(snapshot.windowRemainingMs).toBeLessThanOrEqual(config.autoApprovalWindowMs)
+
+    // Read-only: inspecting twice and then consulting again still auto-grants.
+    expect(describeAnswererQuota(config, id).grantsUsed).toBe(1)
+    expect(consultAnswerer(config, id, 'medium')).toBe('auto')
+    expect(describeAnswererQuota(config, id).grantsUsed).toBe(2)
+  })
+
+  it('reports exhaustion once the ceiling is spent inside the window', () => {
+    const config = testConfig({ autoApprovalMaxGrants: 1 })
+    const id = session()
+    expect(consultAnswerer(config, id, 'medium')).toBe('auto')
+    expect(consultAnswerer(config, id, 'medium')).toBe('delegate')
+
+    const snapshot = describeAnswererQuota(config, id)
+    expect(snapshot.state).toBe('exhausted')
+    expect(snapshot.grantsUsed).toBe(1)
+    expect(snapshot.grantCeiling).toBe(1)
+  })
+
+  it('reports the window re-armed after it expires', () => {
+    vi.useFakeTimers()
+    const config = testConfig({ autoApprovalWindowMs: 1000, autoApprovalMaxGrants: 1 })
+    const id = session()
+    expect(consultAnswerer(config, id, 'medium')).toBe('auto')
+    expect(describeAnswererQuota(config, id).state).toBe('exhausted')
+
+    vi.advanceTimersByTime(1500)
+    expect(describeAnswererQuota(config, id).state).toBe('fresh')
   })
 })

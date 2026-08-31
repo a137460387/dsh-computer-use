@@ -11,6 +11,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ComputerUseConfig } from './src/config.ts'
+import { collectReadiness } from './src/diagnostics/readiness.ts'
 import McpComputerUseProvider from './src/provider-mcp/index.ts'
 import { createAuditor } from './src/security/auditor.ts'
 import { FailureDetector } from './src/security/circuit-breaker.ts'
@@ -22,7 +23,7 @@ import { registerHotkey } from './src/tools/hotkey.ts'
 import { registerPeekCursor } from './src/tools/peek-cursor.ts'
 import { registerResumeActions } from './src/tools/resume-actions.ts'
 import { registerScreenShot } from './src/tools/screen-shot.ts'
-import type { ToolDeps } from './src/tools/shared.ts'
+import { stepCounter, type ToolDeps } from './src/tools/shared.ts'
 import { registerScroll } from './src/tools/scroll.ts'
 import { registerTypeText } from './src/tools/type-text.ts'
 import { ChangeDetector } from './src/vision/change-detector.ts'
@@ -31,6 +32,7 @@ import { createVisionProvider } from './src/vision/vision-provider.ts'
 export { Config } from './src/config.ts'
 export type { ComputerUseConfig } from './src/config.ts'
 export * from './src/definition/index.ts'
+export * from './src/diagnostics/readiness.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'computer-use'
@@ -98,7 +100,8 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
   assertPlatformSupported()
   // Self-contained config fails loud at load: uncompilable sensitive-window
   // regexes never survive to the first screen_shot (construction validates).
-  new SensitiveWindowPolicy(config.sensitiveWindowPatterns, config.sensitiveWindowAllowlist)
+  // The retained instance feeds the readiness checklist.
+  const sensitivePolicy = new SensitiveWindowPolicy(config.sensitiveWindowPatterns, config.sensitiveWindowAllowlist)
 
   const auditor = createAuditor(ctx, config)
   const missing = missingRoutes(config)
@@ -118,12 +121,24 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
   const breaker = new FailureDetector(config.consecutiveFailureCount, config.similarityThreshold)
   const vision = createVisionProvider(ctx, config)
   const changeDetector = new ChangeDetector(vision, config.similarityThreshold)
-  const deps: ToolDeps = { config, dangerFilter, breaker, auditor, changeDetector }
 
   // Direct construction (the ApprovalService precedent): ctx.plugin forwards
   // a single config argument, and the provider additionally needs the auditor.
   // The Service constructor self-registers and unloads with this fiber.
-  new McpComputerUseProvider(ctx, config, auditor)
+  const provider = new McpComputerUseProvider(ctx, config, auditor)
+
+  // Internal diagnostics entry: tool code and operator scripts snapshot the
+  // subsystem states on demand; the report never gates an action by itself.
+  const readiness = (sessionId?: string) => collectReadiness({
+    config,
+    sidecar: provider.readinessFacts(),
+    breaker,
+    auditor,
+    sensitivePolicy,
+    ...sessionId !== undefined ? { session: { id: sessionId, stepsUsed: stepCounter.count(sessionId) } } : {},
+  })
+
+  const deps: ToolDeps = { config, dangerFilter, breaker, auditor, changeDetector, vision, readiness }
 
   registerScreenShot(ctx, deps)
   registerPeekCursor(ctx, deps)

@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import { ObservationId } from '../../src/definition/index.ts'
 import McpComputerUseProvider, {
+  REQUIRED_SIDECAR_TOOLS,
   computerUseBinaryPath,
   resolveSidecarLaunch,
 } from '../../src/provider-mcp/index.ts'
@@ -102,5 +103,64 @@ describe('McpComputerUseProvider observation freshness', () => {
     const ctx = new Context()
     const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
     await expect(provider.getObservation(ObservationId('never'))).resolves.toBeUndefined()
+  })
+})
+
+describe('McpComputerUseProvider readiness facts', () => {
+  it('names the nine-tool sidecar surface the handshake must prove', () => {
+    expect(REQUIRED_SIDECAR_TOOLS).toHaveLength(9)
+    expect([...REQUIRED_SIDECAR_TOOLS]).toEqual(expect.arrayContaining([
+      'get_display_info', 'screen_shot', 'click_at', 'type_text', 'scroll',
+      'hotkey', 'get_foreground_window', 'resume_actions', 'pause_actions',
+    ]))
+  })
+
+  it('reports the lazy-start state before any service use', () => {
+    const ctx = new Context()
+    const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
+    expect(provider.readinessFacts()).toEqual({
+      connected: false,
+      startedOnce: false,
+      disposed: false,
+      requiredToolSurfaceSize: 9,
+      paused: false,
+      healthCheckActive: false,
+    })
+  })
+
+  it('reports a connected sidecar with its handshake facts', () => {
+    const ctx = new Context()
+    const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
+    const internal = provider as unknown as {
+      client: unknown
+      serverVersion: string | undefined
+      connectedToolCount: number | undefined
+      healthTimer: NodeJS.Timeout | undefined
+    }
+    internal.client = {} // any client marks the connection live for diagnostics
+    internal.serverVersion = '0.1.3'
+    internal.connectedToolCount = 9
+    internal.healthTimer = setTimeout(() => {}, 1000)
+
+    const facts = provider.readinessFacts()
+    expect(facts).toEqual({
+      connected: true,
+      startedOnce: false,
+      disposed: false,
+      requiredToolSurfaceSize: 9,
+      paused: false,
+      healthCheckActive: true,
+      serverVersion: '0.1.3',
+      toolSurfaceSize: 9,
+    })
+    clearTimeout(internal.healthTimer)
+  })
+
+  it('reports the paused mirror alongside the connection state', () => {
+    const ctx = new Context()
+    const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
+    const internal = provider as unknown as { paused: boolean }
+    internal.paused = true
+    expect(provider.readinessFacts().paused).toBe(true)
   })
 })

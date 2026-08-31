@@ -26,6 +26,7 @@ JSON-RPC notification (written under the stdout lock shared with responses).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -34,7 +35,7 @@ import time
 
 # Sync point: keep aligned with the Node side's package.json "version" and
 # the MCP client identity version in src/provider-mcp/index.ts.
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 SERVER_NAME = "dsh-cu-server"
 
 # Protocol versions this server negotiates; the client's is echoed when known.
@@ -110,6 +111,7 @@ _TOOL_SCHEMAS: list[dict] = [
                 "quality": {"type": "integer", "description": "JPEG quality 1-100."},
                 "region": {
                     "type": "object",
+                    "description": "Zoom-crop window in the pixel space of the observation named by regionOfObservationId.",
                     "properties": {
                         "x": {"type": "integer"},
                         "y": {"type": "integer"},
@@ -118,6 +120,10 @@ _TOOL_SCHEMAS: list[dict] = [
                     },
                     "required": ["x", "y", "width", "height"],
                     "additionalProperties": False,
+                },
+                "regionOfObservationId": {
+                    "type": "string",
+                    "description": "Observation whose pixel space `region` is expressed in; required exactly with `region`.",
                 },
                 "cursorPosition": {
                     "type": "object",
@@ -237,6 +243,27 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
 
                 raise SensitiveWindowError(title, blocked)
         region = arguments.get("region")
+        basis_id = arguments.get("regionOfObservationId")
+        if (region is None) != (basis_id is None):
+            raise ValueError("region and regionOfObservationId must be supplied together")
+        native_region = None
+        if region is not None:
+            # Scale the region from the basis observation's pixel space into
+            # the sidecar's native capture space; the sidecar owns this math.
+            basis = screen.check_observation(str(basis_id), config["ttl_ms"])
+            if basis.get("captureRegion") is not None:
+                raise ValueError("a zoom-crop observation cannot serve as the basis of another region capture")
+            bw, bh = int(basis["width"]), int(basis["height"])
+            cw = int(basis.get("captureWidth", 0))
+            ch = int(basis.get("captureHeight", 0))
+            if bw <= 0 or bh <= 0 or cw <= 0 or ch <= 0:
+                raise ValueError("the region basis observation lacks usable capture geometry")
+            scale_x, scale_y = cw / bw, ch / bh
+            rx = max(0, min(int(math.floor(float(region["x"]) * scale_x)), cw - 1))
+            ry = max(0, min(int(math.floor(float(region["y"]) * scale_y)), ch - 1))
+            rw = min(max(1, int(math.ceil(float(region["width"]) * scale_x))), cw - rx)
+            rh = min(max(1, int(math.ceil(float(region["height"]) * scale_y))), ch - ry)
+            native_region = (rx, ry, rw, rh)
         cursor = arguments.get("cursorPosition")
         suffix = str(arguments.get("archiveSuffix", ""))
         if suffix and re.fullmatch(r"[A-Za-z0-9_-]{1,16}", suffix) is None:
@@ -248,7 +275,7 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
             ttl_ms=config["ttl_ms"],
             max_width=arguments.get("maxWidth"),
             quality=int(arguments.get("quality", 75)),
-            region=None if region is None else (region["x"], region["y"], region["width"], region["height"]),
+            region=native_region,
             cursor_position=None if cursor is None else (int(cursor["x"]), int(cursor["y"])),
             archive_suffix=suffix,
         )
@@ -266,17 +293,37 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
     pause_state.assert_running()
 
     observation_id = arguments.get("basedOnObservationId")
+    observation_facts = None
     if observation_id is not None:
-        screen.check_observation(str(observation_id), config["ttl_ms"])
+        observation_facts = screen.check_observation(str(observation_id), config["ttl_ms"])
 
     if name == "click_at":
         displays = display.get_displays()
+        capture_region = None
+        if observation_facts is not None and observation_facts.get("captureRegion") is not None:
+            if (
+                int(arguments["screenshotWidth"]) != int(observation_facts["width"])
+                or int(arguments["screenshotHeight"]) != int(observation_facts["height"])
+            ):
+                raise ValueError(
+                    f"click basis mismatch: the zoom-crop observation is "
+                    f"{observation_facts['width']}x{observation_facts['height']} but the call declared "
+                    f"{arguments['screenshotWidth']}x{arguments['screenshotHeight']}"
+                )
+            region_info = observation_facts["captureRegion"]
+            capture_region = (
+                int(region_info["x"]),
+                int(region_info["y"]),
+                int(region_info["width"]),
+                int(region_info["height"]),
+            )
         px, py, target = display.screenshot_point_to_physical(
             float(arguments["x"]),
             float(arguments["y"]),
             int(arguments["screenshotWidth"]),
             int(arguments["screenshotHeight"]),
             displays,
+            capture_region=capture_region,
         )
         pause_state.begin_action()
         try:

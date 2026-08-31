@@ -11,6 +11,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ObservationId } from '../definition/index.ts'
 import {
   computerUse,
+  maybeVerifyAction,
   requestApproval,
   sessionIdOf,
   stepCounter,
@@ -81,9 +82,12 @@ export function registerTypeText(ctx: Context, deps: ToolDeps): void {
         ...args.basedOnObservationId !== undefined ? { basedOnObservationId: ObservationId(args.basedOnObservationId) } : {},
       })
       if (!result.success) throw new Error(`dsh-computer-use: typing refused: ${result.message ?? 'unknown sidecar error'}`)
+      const note = await maybeVerifyAction(ctx, deps, exec, 'type_text', `type ${args.text.length} characters into the focused window`)
       return {
         success: true,
-        ...result.message !== undefined ? { message: result.message } : {},
+        ...result.message !== undefined || note !== undefined
+          ? { message: `${result.message ?? ''}${note ?? ''}`.trim() }
+          : {},
         durationMs: result.durationMs,
         chars: args.text.length,
       }

@@ -113,6 +113,7 @@ export function registerScreenShot(ctx: Context, deps: ToolDeps): void {
         }
       }
       deps.previousShot = { data: shot.data, width: shot.width, height: shot.height, dhash: shot.dhash }
+      deps.previousShotId = shot.observationId
 
       // Breaker accounting for any action that ran before this capture; the
       // trip throws and pauses the run for user intervention.

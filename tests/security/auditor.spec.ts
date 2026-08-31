@@ -190,6 +190,82 @@ describe('createAuditor', () => {
     expect(lines[0]).toMatchObject({ kind: 'action/before', actionType: 'scroll', detail: 'fresh' })
   })
 
+  it('records a verification verdict with its retry facts', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordVerification({
+      sessionId: 'sess-1',
+      toolName: 'click_at',
+      verdict: 'uncertain',
+      reason: 'no visible response',
+      retried: true,
+      retryX: 161,
+      retryY: 92,
+      retryObservationId: 'crop-1',
+    })
+    auditor.recordVerification({ toolName: 'hotkey', verdict: 'yes', retried: false })
+
+    const lines = await waitForLines(config.auditLogPath, 2)
+    expect(lines[0]).toMatchObject({
+      kind: 'verification/result',
+      sessionId: 'sess-1',
+      toolName: 'click_at',
+      verdict: 'uncertain',
+      reason: 'no visible response',
+      retried: true,
+      retryX: 161,
+      retryY: 92,
+      retryObservationId: 'crop-1',
+    })
+    // A verdict without retry facts omits them instead of logging undefined.
+    expect(Object.keys(lines[1] ?? {}).sort()).toEqual(['kind', 'retried', 'timestamp', 'toolName', 'verdict'])
+  })
+
+  it('reports write health none, then ok once an append lands', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    expect(auditor.writeHealth().status).toBe('none')
+
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'health', atMs: Date.now() })
+    await waitForLines(config.auditLogPath, 1)
+    await vi.waitFor(() => { expect(auditor.writeHealth().status).toBe('ok') }, { timeout: 5000, interval: 25 })
+    expect(auditor.writeHealth().atMs).toEqual(expect.any(Number))
+  })
+
+  it('reports write health error when the append cannot land', async () => {
+    const ctx = new Context()
+    // A log path that IS a directory makes every append fail (EISDIR) on
+    // every platform, without breaking the serial queue.
+    const dirPath = join(workRoot, `audit-dir-${Math.random().toString(36).slice(2)}.log`)
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dirPath, { recursive: true })
+    const config = testConfig({ auditLogPath: dirPath })
+    const auditor = createAuditor(ctx, config)
+
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'doomed', atMs: Date.now() })
+
+    await vi.waitFor(() => { expect(auditor.writeHealth().status).toBe('error') }, { timeout: 5000, interval: 25 })
+    expect(auditor.writeHealth().error).toEqual(expect.any(String))
+  })
+
+  it('reports write health error when a retention sweep rewrite fails', async () => {
+    const ctx = new Context()
+    const dirPath = join(workRoot, `sweep-dir-${Math.random().toString(36).slice(2)}.log`)
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dirPath, { recursive: true })
+    const config = testConfig({ auditLogPath: dirPath })
+    const auditor = createAuditor(ctx, config)
+
+    // Reading a directory fails the rewrite; the sweep records the failure
+    // in write health and keeps the sink alive (never throws to the caller).
+    await auditor.sweepRetention()
+    expect(auditor.writeHealth().status).toBe('error')
+  })
+
   it('prunes archived screenshots older than the retention window at startup', async () => {
     const { mkdir, utimes, readdir } = await import('node:fs/promises')
     const ctx = new Context()

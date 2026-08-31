@@ -57,6 +57,11 @@ export class FailureDetector {
     return this.tripped
   }
 
+  /** Consecutive no-change actions counted so far (readiness diagnostics). */
+  get consecutiveNoChange(): number {
+    return this.consecutive
+  }
+
   /** Mark that one action will run before the next observation. */
   noteAction(): void {
     this.actionPending = true

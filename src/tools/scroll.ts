@@ -9,6 +9,7 @@ import { ObservationId } from '../definition/index.ts'
 import type { ScrollDirection } from '../definition/index.ts'
 import {
   computerUse,
+  maybeVerifyAction,
   requestApproval,
   sessionIdOf,
   stepCounter,
@@ -62,9 +63,12 @@ export function registerScroll(ctx: Context, deps: ToolDeps): void {
         ...args.basedOnObservationId !== undefined ? { basedOnObservationId: ObservationId(args.basedOnObservationId) } : {},
       })
       if (!result.success) throw new Error(`dsh-computer-use: scroll refused: ${result.message ?? 'unknown sidecar error'}`)
+      const note = await maybeVerifyAction(ctx, deps, exec, 'scroll', `scroll ${args.direction} by ${args.amount} notches`)
       return {
         success: true,
-        ...result.message !== undefined ? { message: result.message } : {},
+        ...result.message !== undefined || note !== undefined
+          ? { message: `${result.message ?? ''}${note ?? ''}`.trim() }
+          : {},
         durationMs: result.durationMs,
       }
     },

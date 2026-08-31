@@ -13,11 +13,14 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import { consultAnswerer, HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../answerer.ts'
 import type { RiskTier } from '../answerer.ts'
 import type { ComputerUseConfig } from '../config.ts'
-import type { ComputerUseRuntime } from '../definition/index.ts'
+import type { ComputerUseRuntime, ObservationId } from '../definition/index.ts'
+import type { ReadinessReport } from '../diagnostics/readiness.ts'
 import type { Auditor } from '../security/auditor.ts'
 import type { FailureDetector } from '../security/circuit-breaker.ts'
 import type { DangerFilter } from '../security/danger-filter.ts'
 import type { ChangeDetector, HashedFrame } from '../vision/change-detector.ts'
+import { runActionVerification, shouldVerify } from '../vision/verification.ts'
+import type { VisionProvider } from '../vision/vision-provider.ts'
 
 /** Everything the tool consumers share from the bundle wiring. */
 export interface ToolDeps {
@@ -26,8 +29,14 @@ export interface ToolDeps {
   readonly breaker: FailureDetector
   readonly auditor: Auditor
   readonly changeDetector: ChangeDetector
+  /** Vision calls for post-action verification and zoom-crop refinement. */
+  readonly vision: VisionProvider
+  /** Readiness checklist snapshot; `sessionId` scopes the quota and budget items. */
+  readonly readiness: (sessionId?: string) => ReadinessReport
   /** Last captured frame, the change detector's before-side input. */
   previousShot?: HashedFrame
+  /** Observation identity of {@link previousShot}; the zoom-crop region basis. */
+  previousShotId?: ObservationId
 }
 
 /** Resolve the computer-use service; the provider mounts it lazily. */
@@ -161,6 +170,50 @@ export async function whitelistTier(ctx: Context, deps: ToolDeps, baseTier: Risk
   }
 }
 
+/**
+ * Run the advisory post-action semantic verification for one executed
+ * non-click action, when the deployment mode samples it and a baseline
+ * frame exists. Appends nothing to the approval or step accounting — the
+ * action already ran; this only annotates its result and audits the verdict.
+ * @param ctx - context carrying the computer-use service.
+ * @param deps - bundle wiring with the verification config, vision, and audit sink.
+ * @param exec - the tool execution being annotated (session and cancellation).
+ * @param toolName - the tool whose action ran.
+ * @param actionDescription - sanitized summary of the action for the model prompt.
+ * @returns the message note to append to the tool result, or undefined when skipped.
+ */
+export async function maybeVerifyAction(
+  ctx: Context,
+  deps: ToolDeps,
+  exec: ToolExecution,
+  toolName: 'type_text' | 'scroll' | 'hotkey',
+  actionDescription: string,
+): Promise<string | undefined> {
+  const baseline = deps.previousShot
+  if (!shouldVerify(deps.config) || baseline === undefined) return undefined
+  const verdict = await runActionVerification({
+    vision: deps.vision,
+    settleMs: deps.config.actionVerificationSettleMs,
+    before: { data: baseline.data, width: baseline.width, height: baseline.height },
+    actionDescription,
+    captureAfter: () => computerUse(ctx).screenShot({
+      maxWidth: deps.config.screenshotMaxWidth,
+      quality: deps.config.screenshotQuality,
+    }),
+    signal: exec.signal,
+  })
+  deps.auditor.recordVerification({
+    ...exec.agent !== undefined ? { sessionId: String(exec.agent.session.id) } : {},
+    toolName,
+    verdict: verdict.verdict,
+    reason: verdict.reason,
+    retried: false,
+  })
+  return verdict.verdict === 'yes'
+    ? ` Semantic verification confirmed the effect (${verdict.reason}).`
+    : ` Semantic verification: ${verdict.verdict} (${verdict.reason}). Capture a fresh screenshot to inspect.`
+}
+
 /** Per-session action counter enforcing the `maxSteps` ceiling. */
 export class StepCounter {
   private readonly counts = new Map<string, number>()
@@ -179,6 +232,11 @@ export class StepCounter {
   /** Count one executed action against the session. */
   note(sessionId: string): void {
     this.counts.set(sessionId, (this.counts.get(sessionId) ?? 0) + 1)
+  }
+
+  /** Actions counted against one session so far (readiness diagnostics). */
+  count(sessionId: string): number {
+    return this.counts.get(sessionId) ?? 0
   }
 }
 

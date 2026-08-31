@@ -102,6 +102,21 @@ export interface ComputerUseConfig {
   readonly autoApprovalWindowMs: number
   /** Answerer's auto-approval grant ceiling within one window. */
   readonly autoApprovalMaxGrants: number
+  /**
+   * Post-action semantic verification with the change-detection route:
+   * `off` never verifies, `sampled` verifies
+   * {@link actionVerificationSampleRate} of the actions, `always` verifies
+   * every action. Verification is advisory — it annotates the tool result
+   * and may trigger one zoom-crop click retry, never blocks the action.
+   */
+  readonly actionVerification: 'off' | 'sampled' | 'always'
+  /** Fraction (0..1) of actions verified when {@link actionVerification} is `sampled`. */
+  readonly actionVerificationSampleRate: number
+  /**
+   * Wait in milliseconds after an action before the verification capture,
+   * giving the UI time to repaint so the verdict sees the effect.
+   */
+  readonly actionVerificationSettleMs: number
   /** Append-only audit log path under the Harness home. */
   readonly auditLogPath: string
   /** Screenshot archive directory, stored apart from breaker hash fingerprints. */
@@ -169,6 +184,9 @@ export const Config: z<ComputerUseConfig> = z.object({
   sensitiveWindowAllowlist: z.array(String).default([]),
   autoApprovalWindowMs: z.number().step(1).min(1000).max(MAX_TIMER_DELAY_MS).default(300_000),
   autoApprovalMaxGrants: z.number().step(1).min(1).default(50),
+  actionVerification: z.union(['off', 'sampled', 'always'] as const).default('off'),
+  actionVerificationSampleRate: z.number().min(0).max(1).default(0.1),
+  actionVerificationSettleMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(300),
   pythonCommand: z.string().default('python'),
   serverMode: z.union(['dev', 'prod'] as const),
   processGraceMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(5000),

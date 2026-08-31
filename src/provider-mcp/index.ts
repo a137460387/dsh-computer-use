@@ -52,17 +52,36 @@ import {
   hotkeyLabel,
   parseSensitiveWindowFacts,
 } from '../security/refusals.ts'
+import type { SidecarReadinessFacts } from '../diagnostics/readiness.ts'
 import { normalizeHotkey } from '../tools/shared.ts'
 
 /** Sidecar protocol version prefix this plugin is compatible with. */
 const COMPATIBLE_SERVER_PREFIX = '0.1.'
 
 /**
+ * The sidecar tool surface every handshake must prove before any call is
+ * served: the seven model-exposed actions plus the two internal tools
+ * (`get_foreground_window` for the whitelist, `pause_actions` for the
+ * pause re-hold after restarts).
+ */
+export const REQUIRED_SIDECAR_TOOLS = [
+  'get_display_info',
+  'screen_shot',
+  'click_at',
+  'type_text',
+  'scroll',
+  'hotkey',
+  'get_foreground_window',
+  'resume_actions',
+  'pause_actions',
+] as const
+
+/**
  * Plugin identity version reported during the MCP handshake.
  * Sync point: keep aligned with package.json `version` and
  * src-python/main.py `VERSION` (one release moves all three).
  */
-const PLUGIN_VERSION = '0.1.2'
+const PLUGIN_VERSION = '0.1.3'
 
 /** Diagnostic tail retained from sidecar stderr. */
 const STDERR_DIAGNOSTIC_BYTES = 65_536
@@ -239,6 +258,8 @@ interface SidecarScreenShotResult {
   capturedAtMs: number
   /** Present exactly when the capture drew a synthetic cursor overlay. */
   cursorOverlay?: { x: number; y: number }
+  /** Present exactly for zoom-crop captures: the sub-rectangle in full-capture pixels. */
+  captureRegion?: { x: number; y: number; width: number; height: number }
 }
 
 /**
@@ -272,6 +293,12 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
   private paused = false
   /** Attribution for the next sidecar exit; defaults to the crash reading. */
   private exitTrigger: SidecarExitTrigger = 'crash'
+  /** Whether a sidecar start was ever attempted (readiness diagnostics). */
+  private everStarted = false
+  /** Version proven at the current handshake (readiness diagnostics). */
+  private serverVersion: string | undefined
+  /** Tool count enumerated at the current handshake (readiness diagnostics). */
+  private connectedToolCount: number | undefined
 
   constructor(ctx: Context, config: ComputerUseConfig, auditor: Auditor) {
     super(ctx)
@@ -310,6 +337,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
   }
 
   private async startSidecar(): Promise<void> {
+    this.everStarted = true
     const launch = resolveSidecarLaunch(this.config)
     this.auditor.recordLifecycle({ event: 'sidecar-starting', mode: launch.mode, description: launch.description })
     this.ctx.logger.info(`dsh-computer-use: starting sidecar (${launch.description})`)
@@ -358,6 +386,8 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         this.client = undefined
         this.transport = undefined
         this.handle = undefined
+        this.serverVersion = undefined
+        this.connectedToolCount = undefined
         this.stopHealthCheck()
       }
     }, () => {})
@@ -372,6 +402,8 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       if (this.transport === transport) {
         this.client = undefined
         this.transport = undefined
+        this.serverVersion = undefined
+        this.connectedToolCount = undefined
         this.stopHealthCheck()
       }
     }
@@ -406,7 +438,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     // Prove the expected tool surface before serving any call.
     const tools = await client.listTools()
     const names = new Set(tools.tools.map(tool => tool.name))
-    for (const required of ['get_display_info', 'screen_shot', 'click_at', 'type_text', 'scroll', 'hotkey', 'get_foreground_window', 'resume_actions', 'pause_actions']) {
+    for (const required of REQUIRED_SIDECAR_TOOLS) {
       if (!names.has(required)) {
         this.exitTrigger = 'shutdown'
         await client.close()
@@ -435,6 +467,8 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
     this.client = client
     this.transport = transport
+    this.serverVersion = server.version
+    this.connectedToolCount = tools.tools.length
     this.startHealthCheck()
     this.ctx.logger.info(`dsh-computer-use: sidecar connected (${server.name} v${server.version})`)
   }
@@ -481,6 +515,8 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     const handle = this.handle
     this.client = undefined
     this.transport = undefined
+    this.serverVersion = undefined
+    this.connectedToolCount = undefined
     this.stopHealthCheck()
     if (client !== undefined) await client.close().catch(() => {})
     if (handle !== undefined) {
@@ -489,6 +525,28 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       await handle.waitForExit()
     }
     this.handle = undefined
+  }
+
+  // ── readiness diagnostics ──────────────────────────────────────────────────
+
+  /**
+   * Read-only connection facts for the readiness checklist. Never touches
+   * the sidecar: an unstarted provider reports its lazy-start state instead
+   * of spawning a process for a diagnostics call.
+   * @returns the current sidecar facts snapshot.
+   */
+  readinessFacts(): SidecarReadinessFacts {
+    const connected = this.client !== undefined
+    return {
+      connected,
+      startedOnce: this.everStarted,
+      disposed: this.disposed,
+      requiredToolSurfaceSize: REQUIRED_SIDECAR_TOOLS.length,
+      paused: this.paused,
+      healthCheckActive: this.healthTimer !== undefined,
+      ...connected && this.serverVersion !== undefined ? { serverVersion: this.serverVersion } : {},
+      ...connected && this.connectedToolCount !== undefined ? { toolSurfaceSize: this.connectedToolCount } : {},
+    }
   }
 
   // ── serialized sidecar calls ───────────────────────────────────────────────
@@ -614,6 +672,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       if (options?.maxWidth !== undefined) args.maxWidth = options.maxWidth
       if (options?.quality !== undefined) args.quality = options.quality
       if (options?.region !== undefined) args.region = options.region
+      if (options?.regionOfObservationId !== undefined) args.regionOfObservationId = options.regionOfObservationId
       if (options?.cursorPosition !== undefined) args.cursorPosition = options.cursorPosition
       if (options?.archiveSuffix !== undefined) args.archiveSuffix = options.archiveSuffix
       const facts = await this.callSidecar<SidecarScreenShotResult>('screen_shot', args)
@@ -635,6 +694,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         dhash: facts.dhash,
         capturedAtMs: facts.capturedAtMs,
         ...facts.cursorOverlay !== undefined ? { cursorOverlay: facts.cursorOverlay } : {},
+        ...facts.captureRegion !== undefined ? { captureRegion: facts.captureRegion } : {},
       }
     })
   }

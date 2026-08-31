@@ -59,8 +59,18 @@ export interface ScreenShotOptions {
   readonly maxWidth?: number
   /** JPEG quality from 1 through 100. */
   readonly quality?: number
-  /** Crop window in full-screen screenshot pixel coordinates. */
+  /**
+   * Crop window expressed in the pixel space of the observation named by
+   * {@link regionOfObservationId} (the two fields travel together); the
+   * sidecar maps it into its capture space and owns the coordinate math.
+   * Used by the zoom-crop click retry.
+   */
   readonly region?: DisplayBounds
+  /**
+   * Observation whose pixel space {@link region} is expressed in; required
+   * exactly when a region is given.
+   */
+  readonly regionOfObservationId?: ObservationId
   /**
    * Draw a synthetic cursor overlay at this point of the encoded image
    * (screenshot pixel space) without moving the real OS pointer; used for
@@ -98,6 +108,12 @@ export interface ScreenShot {
    * absent for plain captures.
    */
   readonly cursorOverlay?: { readonly x: number; readonly y: number }
+  /**
+   * The captured sub-rectangle in the sidecar's full-capture pixel space,
+   * present exactly for zoom-crop captures; the sidecar uses it to map
+   * this observation's coordinates back onto the physical screen.
+   */
+  readonly captureRegion?: DisplayBounds
 }
 
 /** Outcome of one executed input action. */

@@ -105,4 +105,21 @@ describe('FailureDetector', () => {
     // The next observation is a fresh baseline, not a no-change pair.
     expect(() => detector.observe(UNCHANGED)).not.toThrow()
   })
+
+  it('exposes the no-change count for diagnostics without changing trip logic', () => {
+    const detector = new FailureDetector(5, 5)
+    expect(detector.consecutiveNoChange).toBe(0)
+    detector.observe(UNCHANGED)
+    detector.noteAction()
+    detector.observe(UNCHANGED)
+    expect(detector.consecutiveNoChange).toBe(1)
+    detector.noteAction()
+    detector.observe(CHANGED)
+    expect(detector.consecutiveNoChange).toBe(0)
+    detector.observe(UNCHANGED)
+    detector.noteAction()
+    detector.observe(UNCHANGED)
+    detector.reset()
+    expect(detector.consecutiveNoChange).toBe(0)
+  })
 })

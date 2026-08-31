@@ -13,6 +13,7 @@ function fakeVision(result: boolean): VisionProvider & { calls: () => number } {
     calls: () => calls,
     async analyzeScreenshot() { throw new Error('not used') },
     async detectChange() { calls += 1; return result },
+    async verifyActionEffect() { return { verdict: 'uncertain', reason: 'not used' } },
   }
 }
 

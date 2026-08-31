@@ -46,6 +46,24 @@ interface GrantState {
 const states = new Map<string, GrantState>()
 
 /**
+ * Read-only snapshot of one session's auto-approval quota. Never mutates the
+ * grant window — diagnostics (readiness checklist) consult it without
+ * consuming quota.
+ */
+export interface AnswererQuotaSnapshot {
+  /** `fresh`: no window yet; `active`: quota remaining; `exhausted`: ceiling spent inside a live window. */
+  readonly state: 'fresh' | 'active' | 'exhausted'
+  /** Grants consumed inside the live window (0 when fresh). */
+  readonly grantsUsed: number
+  /** The configured ceiling the window counts against. */
+  readonly grantCeiling: number
+  /** Window length in milliseconds, for interpreting `grantsUsed`. */
+  readonly windowMs: number
+  /** Milliseconds until the live window expires and re-arms; absent when fresh. */
+  readonly windowRemainingMs?: number
+}
+
+/**
  * Decide whether one request may proceed without traversing the approval
  * seam. High risk always delegates; medium risk auto-grants inside the
  * session's window until the grant ceiling is spent, then delegates for the
@@ -76,4 +94,30 @@ export function consultAnswerer(
   }
   states.set(sessionId, { windowStartMs: state.windowStartMs, grants: state.grants + 1 })
   return 'auto'
+}
+
+/**
+ * Inspect one session's auto-approval quota WITHOUT consuming it.
+ * @param config - policy carrying the window length and grant ceiling.
+ * @param sessionId - session whose window is inspected.
+ * @param nowMs - clock override for tests; defaults to `Date.now()`.
+ * @returns the quota snapshot; mirrors the states {@link consultAnswerer} sees.
+ */
+export function describeAnswererQuota(
+  config: Pick<ComputerUseConfig, 'autoApprovalWindowMs' | 'autoApprovalMaxGrants'>,
+  sessionId: string,
+  nowMs: number = Date.now(),
+): AnswererQuotaSnapshot {
+  const state = states.get(sessionId)
+  if (state === undefined || nowMs - state.windowStartMs >= config.autoApprovalWindowMs) {
+    return { state: 'fresh', grantsUsed: 0, grantCeiling: config.autoApprovalMaxGrants, windowMs: config.autoApprovalWindowMs }
+  }
+  const remainingMs = config.autoApprovalWindowMs - (nowMs - state.windowStartMs)
+  return {
+    state: state.grants >= config.autoApprovalMaxGrants ? 'exhausted' : 'active',
+    grantsUsed: state.grants,
+    grantCeiling: config.autoApprovalMaxGrants,
+    windowMs: config.autoApprovalWindowMs,
+    windowRemainingMs: remainingMs,
+  }
 }

@@ -47,3 +47,14 @@ describe('SensitiveWindowPolicy', () => {
     expect(policy.match('anything at all')).toBeUndefined()
   })
 })
+
+describe('SensitiveWindowPolicy sizes', () => {
+  it('exposes the compiled blocklist and allowlist sizes', () => {
+    const policy = new SensitiveWindowPolicy(['keepass', '网银'], ['internal tool'])
+    expect(policy.blocklistSize).toBe(2)
+    expect(policy.allowlistSize).toBe(1)
+    const empty = new SensitiveWindowPolicy([], [])
+    expect(empty.blocklistSize).toBe(0)
+    expect(empty.allowlistSize).toBe(0)
+  })
+})

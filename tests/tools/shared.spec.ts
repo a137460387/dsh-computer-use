@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../../src/answerer.ts'
-import { isHighRiskHotkey, isSameHotkey, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
+import { StepCounter, isHighRiskHotkey, isSameHotkey, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
 import { testConfig } from '../helpers.ts'
 
 describe('normalizeHotkey', () => {
@@ -175,5 +175,17 @@ describe('requestApproval', () => {
 
     await expect(requestApproval(ctx, deps, exec, 'click_at', 'medium', 'click (1, 2)'))
       .rejects.toThrow(/agent-scoped execution/)
+  })
+})
+
+describe('StepCounter.count', () => {
+  it('reports zero for an unseen session and tracks noted actions', () => {
+    const counter = new StepCounter()
+    expect(counter.count('fresh-session')).toBe(0)
+    counter.note('fresh-session')
+    counter.note('fresh_session')
+    counter.note('fresh_session')
+    expect(counter.count('fresh_session')).toBe(2)
+    expect(counter.count('another')).toBe(0)
   })
 })

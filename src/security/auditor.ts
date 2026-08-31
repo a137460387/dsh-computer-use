@@ -47,6 +47,36 @@ export interface AutoApprovalAuditRecord {
   readonly tier: RiskTier
 }
 
+/** Extra audit facts for one post-action semantic verification verdict. */
+export interface VerificationAuditRecord {
+  /** Session whose action was verified, when known. */
+  readonly sessionId?: string
+  /** The tool whose action was verified. */
+  readonly toolName: string
+  /** The flash model's verdict on whether the intended effect happened. */
+  readonly verdict: 'yes' | 'no' | 'uncertain'
+  /** The model's one-line justification, when one survived parsing. */
+  readonly reason?: string
+  /** Whether the verdict triggered a zoom-crop click retry. */
+  readonly retried: boolean
+  /** Retry click point in crop pixels, present once a retry executed. */
+  readonly retryX?: number
+  /** Retry click point in crop pixels, present once a retry executed. */
+  readonly retryY?: number
+  /** Observation of the zoom crop the retry clicked on, when it executed. */
+  readonly retryObservationId?: string
+}
+
+/** Health of the audit sink's most recent write attempt. */
+export interface AuditWriteHealth {
+  /** `ok`: last write landed; `error`: it failed; `none`: nothing written yet. */
+  readonly status: 'ok' | 'error' | 'none'
+  /** When the recorded attempt happened, absent for `none`. */
+  readonly atMs?: number
+  /** Failure diagnostics, present exactly for `error`. */
+  readonly error?: string
+}
+
 /** Why desktop control paused or resumed. */
 export type PauseReason = 'hotkey' | 'user-input' | 'manual'
 
@@ -85,10 +115,14 @@ export interface Auditor {
    * plugin line because the ApprovalService logs its own session events.
    */
   recordAutoApproval(record: AutoApprovalAuditRecord): void
+  /** Log one post-action semantic verification verdict (advisory channel). */
+  recordVerification(record: VerificationAuditRecord): void
   /** Log one lifecycle transition (mount, sidecar lifetime, pause/resume). */
   recordLifecycle(event: LifecycleEvent): void
   /** Run one retention sweep now; resolves when the pruning hits disk. */
   sweepRetention(): Promise<void>
+  /** Health of the sink's most recent write attempt (readiness diagnostics). */
+  writeHealth(): AuditWriteHealth
 }
 
 /**
@@ -99,19 +133,37 @@ export interface Auditor {
 class AuditLog {
   private queue: Promise<unknown> = Promise.resolve()
   private dirEnsured = false
+  private lastWrite: AuditWriteHealth = { status: 'none' }
 
   constructor(private readonly path: string) {}
+
+  /** Health of the most recent queued write attempt. */
+  writeHealth(): AuditWriteHealth {
+    return this.lastWrite
+  }
+
+  /** Record one write attempt outcome; later attempts overwrite it. */
+  noteWriteOutcome(error: unknown): void {
+    this.lastWrite = error === undefined
+      ? { status: 'ok', atMs: Date.now() }
+      : { status: 'error', atMs: Date.now(), error: String(error) }
+  }
 
   /** Queue one JSON line; a failed append never breaks the serial chain. */
   append(line: Record<string, unknown>): void {
     void this.enqueue(async () => {
       await this.ensureDir()
       await appendFile(this.path, `${JSON.stringify(line)}\n`, 'utf8')
-    }).catch(() => {
-      // Append I/O failures stay swallowed at the queue tail: the audit sink
-      // must not surface an unhandled rejection into its host, and the chain
-      // already continues past a rejected step.
-    })
+    }).then(
+      () => this.noteWriteOutcome(undefined),
+      (error: unknown) => {
+        this.noteWriteOutcome(error)
+        // Append I/O failures stay swallowed at the queue tail: the audit sink
+        // must not surface an unhandled rejection into its host, and the chain
+        // already continues past a rejected step. The write-health state above
+        // is how readiness diagnostics observe the failure.
+      },
+    )
   }
 
   /**
@@ -131,7 +183,13 @@ class AuditLog {
       }
       const kept = raw.split('\n').filter(rawLine => rawLine.trim() !== '' && keep(rawLine))
       await writeFile(this.path, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8')
-    })
+    }).then(
+      () => this.noteWriteOutcome(undefined),
+      (error: unknown) => {
+        this.noteWriteOutcome(error)
+        throw error
+      },
+    )
   }
 
   private async ensureDir(): Promise<void> {
@@ -219,6 +277,20 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         tier: record.tier,
       })
     },
+    recordVerification(record: VerificationAuditRecord): void {
+      log.append({
+        kind: 'verification/result',
+        timestamp: new Date().toISOString(),
+        ...record.sessionId !== undefined ? { sessionId: record.sessionId } : {},
+        toolName: record.toolName,
+        verdict: record.verdict,
+        ...record.reason !== undefined ? { reason: record.reason } : {},
+        retried: record.retried,
+        ...record.retryX !== undefined ? { retryX: record.retryX } : {},
+        ...record.retryY !== undefined ? { retryY: record.retryY } : {},
+        ...record.retryObservationId !== undefined ? { retryObservationId: record.retryObservationId } : {},
+      })
+    },
     recordLifecycle(event: LifecycleEvent): void {
       const { event: name, ...facts } = event
       log.append({
@@ -228,6 +300,7 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
       })
     },
     sweepRetention: () => runRetentionSweep(ctx, config, log),
+    writeHealth: () => log.writeHealth(),
   }
 }
 

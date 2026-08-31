@@ -670,3 +670,110 @@ README Known Limitations 已补明该情形。本轮不修。
   归档存在、非法 suffix 拒绝。
 - 样张目检：1280x720 与 2560x1440 渐变背景，箭头形状/描边/标签正确，
   scale=2 等比放大。
+
+## Phase 7 交付结论（就绪度体检清单 + 语义验证/zoom-crop 重试，2026-09-01）
+
+对应待办 4（P1）：子任务 A（readiness checklist）与子任务 B（语义验证 +
+zoom-crop 重试）。模型可见工具面保持 8 个不变——两项能力均为内部编排/诊断面。
+
+### P7-1：子任务 A — 就绪度体检清单（内部诊断面）
+
+**现状探查结论**：此前不存在任何聚合健康检查；可复用信号源分散在六处——
+provider 的握手/工具面/暂停镜像/健康定时器（私有字段）、answerer 的模块私有
+配额表、`FailureDetector.isTripped`、AuditLog 吞错的追加队列（无写入状态）、
+挂载期即弃的 `SensitiveWindowPolicy` 实例、`StepCounter` 私有计数。
+
+**实现**：新模块 `src/diagnostics/readiness.ts`，`collectReadiness(input)`
+汇总 8 个条目（每项 pass/fail/unknown + 原因，总体三态折叠：
+任一 fail→fail；否则任一 unknown→unknown；否则 pass）：
+
+1. `sidecar-connection` — 未首用→unknown（惰性启动是设计）；已连接→pass
+   （版本+健康定时器）；曾尝试而未连→fail；disposed→fail。
+2. `sidecar-tool-surface` — 握手期已验证的 9 工具面（常量
+   `REQUIRED_SIDECAR_TOOLS` 从 startSidecar 内联列表提取）。
+3. `approval-quota` — 有 sessionId 时按 `describeAnswererQuota` 只读快照判
+   fresh/active/exhausted（耗尽→fail，注明恢复时间与 never 会话后果）；
+   无 sessionId→unknown 并提示传参。
+4. `no-change-breaker` — tripped→fail（含连续计数），否则 pass（含部分计数）。
+5. `audit-writable` — AuditLog 新增写入健康跟踪：append/compact 成败均记
+   `noteWriteOutcome`（原吞错语义不变，健康状态是观测口），`Auditor.writeHealth()`
+   暴露 none/ok/error。
+6. `sensitive-window-rules` — 编译规模（新增两个 size getter）+ 平台事实
+   （darwin 无标题读取→unknown，空封禁名单→pass 注明禁用）。
+7. `takeover-monitor` — 配置禁用→pass；darwin→unknown；已连接→pass（监控
+   线程在 sidecar 启动时同步拉起，连接活着即已武装；暂停镜像一并报出）。
+8. `step-budget` — 仅当给定 session 时输出（剩余步数/上限）。
+
+**接线**：`apply()` 保留 provider 与 sensitivePolicy 实例，构造
+`readiness(sessionId?)` 闭包进 `ToolDeps`；`index.ts` 再导出诊断模块。
+默认无生产调用点（诊断入口，行为零改变）——是否挂进高危动作前置门属
+行为变更，留待核准。
+
+### P7-2：子任务 B — 语义验证 + zoom-crop 重试（默认关闭）
+
+**配置**（默认全关）：`actionVerification: 'off'|'sampled'|'always'`、
+`actionVerificationSampleRate`（默认 0.1）、`actionVerificationSettleMs`
+（默认 300，给 UI 重绘时间，避免假 no）。
+
+**语义验证**：`VisionProvider.verifyActionEffect(before, after, description)`
+走 changeDetection 路由（即部署的 flash 模型，image 能力），提示词要求
+`{"verdict":"yes|no|uncertain","reason":...}`；**永不抛出**——模型/网络/解析
+失败一律降级为 `uncertain`。编排 `runActionVerification`（settle→捕获 after
+帧→模型判定；帧尺寸变化不调模型直接 uncertain）。四个动作工具全部接线：
+click_at 内联（因为要接重试），其余三个经 `maybeVerifyAction` 共享胶水。
+审计新通道 `verification/result`（verdict/reason/retried/retry 坐标与
+crop observationId）。
+
+**zoom-crop 重试**（仅 click_at，上限 1 次）：
+
+1. 触发：验证判定 no/uncertain 且基线帧与点击 basis 同尺寸。
+2. `cropRectForPoint` 以 4x 放大取目标邻域（夹紧保证点落在裁剪内，
+   <16px 帧拒绝）。
+3. **协议扩展（sidecar 0.1.3，向后兼容）**：`screen_shot` 新增
+   `regionOfObservationId`——region 以该 observation 的像素空间表达，
+   sidecar 按其 `captureWidth/Height` 事实换算到原生捕获空间；全帧捕获后
+   PIL 裁剪（坐标数学仍全部归 sidecar）。observation 事实记录
+   `captureRegion`，`click_at` 命中 region observation 时按区域做第一阶段
+   映射（第二阶段显示器解析不变），并强制声明尺寸=事实尺寸（不符拒绝）。
+   旧 Node+新 sidecar 无感；新 Node+旧 sidecar 仅降级（重试跳过）。
+4. 精定位**复用现有 `analyzeScreenshot`**（主力视觉路由）——提示词给出
+   crop 内近似点，要求返回 click 精确坐标；这给 Known Limitation ③
+   钉死的"无生产调用点"新增了一个可选生产调用点（默认关闭路径内）。
+5. 重试点击使用 crop basis（crop.observationId + crop 尺寸），落在原审批
+   执行体内：一次逻辑动作、一次步数、一次 `breaker.noteAction()`
+   （actionPending 是布尔，两次物理点击在同一观察对里只计一次——
+   偏保守方向，接受）；重试不另走审批。
+6. 降级行为：验证不可用/捕获失败/精定位拒绝（模型答 observe）/重试被拒
+   （如暂停）都只写进结果 message 与审计，`success` 仍反映物理点击已执行；
+   "重试后仍不确定"明确报告，不假装成功。
+
+**平台范围**：region 捕获与映射仅 Windows；darwin 对 region 捕获 fail-closed
+拒绝（fail-open 风险大于收益；无 mac 实测环境）。
+
+**不做（避免未核准的工具面变更）**：未给 `click_at` 增加"调用方主动请求
+重试"的参数——那会改模型可见工具签名；本轮触发仅限验证判定。
+
+### P7-3：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误；`vitest run` 194/194（128 旧 + 66 新：
+  readiness 22、verification 编排 21、verifyActionEffect 6、auditor 4、
+  answerer 快照 4、其余小项）。覆盖率分母新增 `src/diagnostics/**`：
+  definition 100% / diagnostics 100% / security 语句 ~96% / vision ~88%。
+- `python -m unittest discover -s tests/python` 63/63（47 旧 + 16 新：
+  region 捕获 6、区域映射 4、dispatch 协议 6）。
+- `tests/dev-mcp-smoke.py` 新增 id 16-19（region 捕获、crop basis 点击、
+  尺寸不符拒绝、孤立 region 拒绝），源码与重建产物双双全过；真实
+  3840×2160 桌面实测：1280×720 basis 的 (480,270,320,180) region 换算为
+  原生 (1440,810,960,540)，crop 中心点击映射回物理 (1920,1080)=全屏中心，
+  与全帧点击结果逐像素一致。
+- PyInstaller 重建（0.1.3）：89.5 MiB，SHA256
+  `9454a8bed8626faf4de8879c942c7f5c2eba1db1335a303abcaa2e8337cf9ffa`；
+  initialize 握手报 v0.1.3。
+
+### P7-4：只记录（本轮未动）
+
+1. `stepDelayMs` 配置无任何消费点（疑似遗留），未改。
+2. readiness 无默认生产调用点；挂进高危动作前置门会改变拒绝行为，待核准。
+3. `click_at` "调用方主动请求重试"参数属模型可见签名变更，待核准。
+4. region 捕获的 macOS 支持（需 mac 实测定标），现 fail-closed 拒绝。
+5. 上游 fork 工作区存在 `.dsh-cu-tmp/` 未跟踪目录，属上游仓库范围，未触碰。

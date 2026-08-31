@@ -56,6 +56,14 @@ def capture_screenshot(
 ) -> dict:
     """Capture, compress, archive, and register one observation.
 
+    A ``region`` is a zoom-crop request: the FULL virtual screen is captured
+    first and the rectangle (in that full-capture's pixel space) is cropped
+    out, so the sidecar keeps owning every coordinate transformation. The
+    registered observation records the crop rectangle and the full-capture
+    dimensions; a later ``click_at`` referencing that observation maps its
+    screenshot-space point through the recorded region. Region captures are
+    Windows-only this release (fail-closed elsewhere).
+
     cursor_position draws a synthetic cursor overlay into the final
     (post-resize) image pixel space before encoding — the archived bytes and
     the reported dHash describe the frame WITH the overlay. archive_suffix is
@@ -65,12 +73,30 @@ def capture_screenshot(
     import pyautogui
 
     _prune_expired(ttl_ms)
-    image = pyautogui.screenshot(region=tuple(region) if region is not None else None)
+    image = pyautogui.screenshot()
     if image is None:
         raise RuntimeError(
             "screenshot capture returned nothing"
             + (" (macOS: grant Screen Recording permission)" if sys.platform == "darwin" else "")
         )
+
+    capture_width, capture_height = image.size
+    capture_region: dict | None = None
+    if region is not None:
+        if sys.platform == "darwin":
+            raise ValueError(
+                "zoom-crop (region) capture is not implemented on macOS in this release;"
+                " capture a full screenshot and act on it directly"
+            )
+        rx, ry, rw, rh = (int(value) for value in region)
+        if rw <= 0 or rh <= 0:
+            raise ValueError(f"crop region {(rx, ry, rw, rh)} must have positive size")
+        if rx < 0 or ry < 0 or rx + rw > image.width or ry + rh > image.height:
+            raise ValueError(
+                f"crop region {(rx, ry, rw, rh)} is outside the {image.width}x{image.height} capture"
+            )
+        image = image.crop((rx, ry, rx + rw, ry + rh))
+        capture_region = {"x": rx, "y": ry, "width": rw, "height": rh}
 
     if max_width is not None and image.width > max_width:
         ratio = max_width / image.width
@@ -102,7 +128,14 @@ def capture_screenshot(
         "height": image.height,
         "path": path,
         "dhash": dhash(image),
+        # Full-capture geometry lets a later click_at interpret this
+        # observation's coordinates (region-aware mapping) even though only
+        # the crop crosses the wire.
+        "captureWidth": capture_width,
+        "captureHeight": capture_height,
     }
+    if capture_region is not None:
+        facts["captureRegion"] = capture_region
     _OBSERVATIONS[observation_id] = facts
     result = {
         "observationId": observation_id,
@@ -115,6 +148,8 @@ def capture_screenshot(
     }
     if cursor_position is not None:
         result["cursorOverlay"] = {"x": cursor_position[0], "y": cursor_position[1]}
+    if capture_region is not None:
+        result["captureRegion"] = capture_region
     return result
 
 

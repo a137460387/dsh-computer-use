@@ -139,3 +139,58 @@ describe('createVisionProvider.detectChange', () => {
     await expect(provider.detectChange(image, image)).resolves.toBe(false)
   })
 })
+
+describe('createVisionProvider.verifyActionEffect', () => {
+  it('parses a yes verdict on the change-detection route and persists both frames', async () => {
+    const { ctx, saved, options } = fakeCtx(textChunks('{"verdict":"yes","reason":"the dialog appeared"}'))
+    const provider = createVisionProvider(ctx, testConfig())
+
+    await expect(provider.verifyActionEffect(image, image, 'click at (10, 10)'))
+      .resolves.toEqual({ verdict: 'yes', reason: 'the dialog appeared' })
+    expect(saved).toHaveLength(2)
+    expect(options()?.provider).toBe('cp')
+    expect(options()?.model).toBe('cm')
+  })
+
+  it('parses no and uncertain verdicts', async () => {
+    const { ctx } = fakeCtx(textChunks('{"verdict":"no","reason":"nothing moved"}'))
+    const provider = createVisionProvider(ctx, testConfig())
+    await expect(provider.verifyActionEffect(image, image, 'hotkey ctrl+c'))
+      .resolves.toEqual({ verdict: 'no', reason: 'nothing moved' })
+  })
+
+  it('degrades an unknown verdict to uncertain instead of throwing', async () => {
+    const { ctx } = fakeCtx(textChunks('{"verdict":"maybe","reason":"x"}'))
+    const provider = createVisionProvider(ctx, testConfig())
+    const verdict = await provider.verifyActionEffect(image, image, 'scroll down')
+    expect(verdict.verdict).toBe('uncertain')
+    expect(verdict.reason).toContain('unknown verdict')
+  })
+
+  it('degrades a verdict missing its reason to uncertain', async () => {
+    const { ctx } = fakeCtx(textChunks('{"verdict":"yes"}'))
+    const provider = createVisionProvider(ctx, testConfig())
+    const verdict = await provider.verifyActionEffect(image, image, 'click')
+    expect(verdict.verdict).toBe('uncertain')
+    expect(verdict.reason).toContain('reason')
+  })
+
+  it('degrades output without a JSON object to uncertain', async () => {
+    const { ctx } = fakeCtx(textChunks('looks fine to me'))
+    const provider = createVisionProvider(ctx, testConfig())
+    const verdict = await provider.verifyActionEffect(image, image, 'click')
+    expect(verdict.verdict).toBe('uncertain')
+    expect(verdict.reason).toContain('no JSON object')
+  })
+
+  it('degrades an error finish to uncertain instead of throwing', async () => {
+    const chunks: StreamChunk[] = [
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'route down', code: 'X' } } },
+    ]
+    const { ctx } = fakeCtx(chunks)
+    const provider = createVisionProvider(ctx, testConfig())
+    const verdict = await provider.verifyActionEffect(image, image, 'click')
+    expect(verdict.verdict).toBe('uncertain')
+    expect(verdict.reason).toContain('route down')
+  })
+})

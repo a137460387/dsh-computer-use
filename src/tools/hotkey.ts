@@ -12,6 +12,7 @@ import {
   computerUse,
   isHighRiskHotkey,
   isSameHotkey,
+  maybeVerifyAction,
   normalizeHotkey,
   requestApproval,
   sessionIdOf,
@@ -71,9 +72,12 @@ export function registerHotkey(ctx: Context, deps: ToolDeps): void {
         ...args.basedOnObservationId !== undefined ? { basedOnObservationId: ObservationId(args.basedOnObservationId) } : {},
       })
       if (!result.success) throw new Error(`dsh-computer-use: hotkey refused: ${result.message ?? 'unknown sidecar error'}`)
+      const note = await maybeVerifyAction(ctx, deps, exec, 'hotkey', `press ${normalizeHotkey(args.keys)}`)
       return {
         success: true,
-        ...result.message !== undefined ? { message: result.message } : {},
+        ...result.message !== undefined || note !== undefined
+          ? { message: `${result.message ?? ''}${note ?? ''}`.trim() }
+          : {},
         durationMs: result.durationMs,
       }
     },

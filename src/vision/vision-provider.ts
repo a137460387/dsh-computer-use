@@ -43,6 +43,14 @@ export interface ScreenAnalysis {
   readonly reason: string
 }
 
+/** Structured verdict on whether one executed action had its intended effect. */
+export interface ActionEffectVerdict {
+  /** `yes`: the effect happened; `no`: it did not; `uncertain`: the frames do not decide it. */
+  readonly verdict: 'yes' | 'no' | 'uncertain'
+  /** One-line justification, mandatory. */
+  readonly reason: string
+}
+
 /** Vision calls over the harness LLM seam. */
 export interface VisionProvider {
   /**
@@ -62,6 +70,24 @@ export interface VisionProvider {
    * @returns true when the screen changed.
    */
   detectChange(before: VisionImage, after: VisionImage, signal?: AbortSignal): Promise<boolean>
+
+  /**
+   * Judge whether one executed action produced its intended effect by
+   * comparing the frames around it, on the change-detection route. Never
+   * throws: an unusable model answer or call failure degrades to
+   * `uncertain` — verification is advisory, never a gate.
+   * @param before - the pre-action frame.
+   * @param after - the post-action frame.
+   * @param actionDescription - sanitized summary of the executed action.
+   * @param signal - caller cancellation.
+   * @returns the verdict plus its one-line justification.
+   */
+  verifyActionEffect(
+    before: VisionImage,
+    after: VisionImage,
+    actionDescription: string,
+    signal?: AbortSignal,
+  ): Promise<ActionEffectVerdict>
 }
 
 /** Capability-owned timeout reason code for auxiliary vision requests. */
@@ -83,6 +109,25 @@ const CHANGE_SYSTEM_PROMPT = [
   'Ignore cursor position, blinking carets, and clock changes.',
   'Reply with exactly one word: CHANGED or UNCHANGED.',
 ].join('\n')
+
+const VERIFICATION_SYSTEM_PROMPT = [
+  'You verify one executed desktop action by comparing the BEFORE and AFTER screenshots.',
+  'Judge whether the intended effect of the action happened: a clicked control activated,',
+  'typed text appeared, content scrolled, or a hotkey opened its target.',
+  'Ignore cursor position, blinking carets, clock changes, and a synthetic cyan cursor arrow.',
+  'Reply with ONLY one JSON object, no Markdown fences, no extra text:',
+  '{"verdict":"yes"|"no"|"uncertain","reason":"one short sentence"}',
+  'Use "uncertain" when the frames neither prove nor disprove the effect.',
+].join('\n')
+
+/** Refinement task for one zoom-crop relocalization (primary vision route). */
+export function zoomCropRefinementPrompt(cropX: number, cropY: number): string {
+  return 'This is a zoomed-in crop of a desktop region. A click was intended for the control at '
+    + `approximately (${cropX}, ${cropY}) in THIS crop's pixels but may have landed imprecisely. `
+    + 'Locate the exact activation center of that control (the button, link, or field the point was '
+    + 'aiming at) and answer with action "click" at its precise coordinates in THIS crop\'s pixels. '
+    + 'If no clickable control exists near that point, answer "observe".'
+}
 
 /** Persist one frame and return its durable attachment reference. */
 async function persistImage(ctx: Context, image: VisionImage, name: string): Promise<ImageAttachmentRef> {
@@ -212,6 +257,21 @@ function toScreenAnalysis(raw: Record<string, unknown>, image: VisionImage): Scr
   return analysis
 }
 
+const VERIFICATION_VERDICTS = new Set(['yes', 'no', 'uncertain'])
+
+/** Validate one parsed verification answer into the closed verdict shape. */
+function toActionEffectVerdict(raw: Record<string, unknown>): ActionEffectVerdict {
+  const verdict = raw.verdict
+  if (typeof verdict !== 'string' || !VERIFICATION_VERDICTS.has(verdict)) {
+    throw new Error(`dsh-computer-use: verification model returned unknown verdict ${JSON.stringify(verdict)}`)
+  }
+  const reason = raw.reason
+  if (typeof reason !== 'string' || reason.length === 0) {
+    throw new Error('dsh-computer-use: verification verdict is missing its reason')
+  }
+  return { verdict: verdict as ActionEffectVerdict['verdict'], reason }
+}
+
 /**
  * Build the deployment's VisionProvider over `ctx.llm` and `ctx.attachments`.
  * @param ctx - context carrying the LLM and attachment services.
@@ -247,6 +307,28 @@ export function createVisionProvider(ctx: Context, config: ComputerUseConfig): V
         signal,
       )
       return /\bCHANGED\b/i.test(text) && !/\bUNCHANGED\b/i.test(text)
+    },
+
+    async verifyActionEffect(before, after, actionDescription, signal) {
+      // Advisory contract: nothing below may surface as a thrown failure —
+      // every degraded path becomes an `uncertain` verdict with its reason.
+      try {
+        const [beforeRef, afterRef] = await Promise.all([
+          persistImage(ctx, before, 'cu-verification-before.jpg'),
+          persistImage(ctx, after, 'cu-verification-after.jpg'),
+        ])
+        const text = await streamToText(
+          ctx,
+          config,
+          { provider: config.changeDetectionProvider, model: config.changeDetectionModel },
+          VERIFICATION_SYSTEM_PROMPT,
+          [visionMessage([beforeRef, afterRef], `Action executed: ${actionDescription}\nDid its intended effect happen?`)],
+          signal,
+        )
+        return toActionEffectVerdict(extractJsonObject(text))
+      } catch (error) {
+        return { verdict: 'uncertain', reason: `verification unavailable: ${String(error)}` }
+      }
     },
   }
 }

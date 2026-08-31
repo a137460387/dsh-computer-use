@@ -86,6 +86,11 @@ The bundle ships **UNCONFIGURED on purpose**: the four model-route fields defaul
     autoApprovalWindowMs: 300000    # medium-risk auto-grant window
     autoApprovalMaxGrants: 50       # grant ceiling per window, then interactive
 
+    # ── Post-action verification (advisory, default off) ──
+    actionVerification: 'off'       # off | sampled | always
+    actionVerificationSampleRate: 0.1   # fraction verified in 'sampled' mode
+    actionVerificationSettleMs: 300     # UI settle wait before the after-capture
+
     # ── Sidecar transport ──
     pythonCommand: python           # dev-mode interpreter
     # serverMode: !!js process.env.DSH_CU_MODE   # dev|prod; unset auto-detects
@@ -108,6 +113,7 @@ Key facts:
 - **Approval semantics are a plugin pre-dispatch decision.** Medium-risk actions consult the plugin's answerer BEFORE the host approval seam: inside the session's `autoApprovalWindowMs` / `autoApprovalMaxGrants` quota they auto-grant (each grant writes an `answer/auto-allowed` audit line), so unattended sessions run without prompting. Everything else — high risk, or a medium request after the quota is spent — goes to `ctx.approval.request`: interactive (`ask`) sessions confirm there, while never-approval sessions (the Web UI "Full access" default) reject deterministically, and the tool surfaces that as configuration guidance (switch to Workspace Write) instead of a bare rejection. High-risk actions under Full access are fail-closed by design.
 - **Takeover semantics**: while desktop control is paused, `click_at`/`type_text`/`scroll`/`hotkey` are refused with recovery guidance; `screen_shot`, `get_display_info`, and `resume_actions` stay available. Resume by pressing the takeover hotkey again or calling `resume_actions`. The pause state is pushed to the plugin as an MCP notification, audited (`lifecycle/paused`, `lifecycle/resumed`), and re-engaged automatically if the sidecar restarts.
 - **Sensitive-window semantics**: the sidecar checks the foreground window title BEFORE capturing; a hit refuses the screenshot without archiving, persisting, or model-sending any pixels, and writes a `danger/sensitive-window` audit line (title logged, screen content never).
+- **Post-action verification is advisory and off by default.** With `actionVerification` set to `sampled`/`always`, the change-detection route judges the before/after frames around each executed action (`yes`/`no`/`uncertain` + reason); the verdict annotates the tool result message and writes a `verification/result` audit line. A `no`/`uncertain` verdict on `click_at` triggers exactly one zoom-crop retry: a magnified capture around the target that the vision route relocalizes (`analyzeScreenshot`) before a single re-click on the crop basis. Verification never blocks, re-approves, or throws into the action it annotates; retries stay inside the approved click (one extra physical click, audited) and report "still unconfirmed" honestly instead of claiming success. The internal readiness checklist (`collectReadiness`, exported for diagnostics) snapshots sidecar connection/tool surface, approval quota, breaker, audit sink, sensitive-window rules, takeover monitor, and step budget on demand.
 
 ## Troubleshooting
 
@@ -143,7 +149,9 @@ Documented failure modes with a cause and a remedy, collected here by symptom; i
 - **The takeover hotkey is detected by a 50 ms poll.** The monitor samples `GetAsyncKeyState` every 50 ms, so a synthetic key press held for less than one poll interval (below ~100 ms) can fall between two samples and be missed; hold the combo for at least 100 ms when triggering the takeover programmatically.
 - **pause-on-user-input cannot tell automation from the user.** Detection watches real OS input events, so input injected by ANY automation counts as the user taking over and pauses the action tools — including the agent's OWN out-of-band automation (driving the UI through a shell tool like PowerShell UIAutomation instead of the computer-use tools), test drivers, other Computer Use sessions, and macro tools. Automated verification of this plugin must submit the task, then observe passively with zero input until the run finishes.
 - **Pause monitoring and the sensitive-window gate are Windows-only** (pure ctypes; no new dependencies). On macOS the monitor does not run (the takeover hotkey and user-input pause are unavailable; `resume_actions` still works) and the capture gate cannot read window titles, so capture is fail-open there.
-- Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and seam-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, auto-approval grants, and lifecycle transitions are audited).
+- **Zoom-crop retries ride one extra physical click.** A retried click stays inside the original approval (one logical action, one step) and is only reachable when verification ran, so it inherits verification's gating (`actionVerification`, default off). The retry's intent frame is its `verification/result` audit line plus the crop observation, not a `-preview` capture.
+- **Zoom-crop captures are Windows-only this release.** On macOS the sidecar refuses region captures fail-closed (its capture covers the primary display and the crop-to-physical mapping is unverified there); verification still runs, only the retry is skipped.
+- Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; `visionProvider.analyzeScreenshot` has one OPTIONAL production call site — the zoom-crop refinement, reachable only when `actionVerification` samples the click (default off); with verification off, the main agent model still locates targets itself; TTL-expired and seam-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, auto-approval grants, verification verdicts, and lifecycle transitions are audited).
 
 ## Model Experience
 
@@ -173,6 +181,7 @@ The expected loop: `screen_shot` → decide from the returned image → one acti
 - **System hotkeys** (`win+r`, `win+i`, `win+x`, `win+l`, `alt+f4`, `ctrl+shift+esc`) always require interactive confirmation, even inside an auto-approval window; never-approval sessions refuse them outright.
 - **The no-change breaker** pauses the run after consecutive actions whose surrounding frames are perceptually identical (dHash distance within the similarity ceiling), asking for user intervention.
 - **The step ceiling** stops a session after `maxSteps` actions.
+- **Verification notes in action results.** When `actionVerification` is on, action results may carry a semantic-verification sentence ("confirmed the effect", "uncertain… retry clicked (x, y)… still unconfirmed"); a retry never changes `success` (the physical click ran) — read the note and capture a fresh screenshot to inspect.
 
 ### Token effect
 

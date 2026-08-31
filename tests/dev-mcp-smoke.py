@@ -24,10 +24,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / "src-python" / "main.py"
+DEFAULT_SERVER = ROOT / "src-python" / "main.py"
 
 
 def main() -> int:
+    server = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_SERVER
+    command = [str(server)] if server.suffix == ".exe" else [sys.executable, str(server)]
     archive = tempfile.mkdtemp(prefix="dsh-cu-smoke-")
     env = dict(os.environ)
     env["DSH_CU_SCREENSHOT_DIR"] = archive
@@ -39,7 +41,7 @@ def main() -> int:
     env["PYTHONIOENCODING"] = "utf-8"
 
     proc = subprocess.Popen(
-        [sys.executable, str(SERVER)],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -186,6 +188,52 @@ def main() -> int:
     }}})
     bad_suffix = recv(14)
     check("invalid archiveSuffix refused", bad_suffix.get("result", {}).get("isError") is True, bad_suffix)
+
+    # Zoom-crop protocol: a region capture based on observation `oid` reports
+    # the crop rectangle, and a click on the crop observation maps through it.
+    region = {"x": width * 3 // 8, "y": height * 3 // 8, "width": width // 4, "height": height // 4}
+    send({"jsonrpc": "2.0", "id": 16, "method": "tools/call", "params": {"name": "screen_shot", "arguments": {
+        "region": region, "regionOfObservationId": oid,
+    }}})
+    crop = recv(16)
+    crop_content = crop.get("result", {}).get("structuredContent", {})
+    crop_oid = crop_content.get("observationId", "")
+    crop_region = crop_content.get("captureRegion")
+    check("screen_shot region capture", crop_oid != "" and isinstance(crop_region, dict), crop)
+    check(
+        "region crop dimensions",
+        crop_content.get("width") == crop_region.get("width") and crop_content.get("height") == crop_region.get("height"),
+        crop_content,
+    )
+    print(f"     crop {crop_content.get('width')}x{crop_content.get('height')} region={crop_region}")
+
+    send({"jsonrpc": "2.0", "id": 17, "method": "tools/call", "params": {"name": "click_at", "arguments": {
+        "x": crop_content.get("width", 0) / 2, "y": crop_content.get("height", 0) / 2,
+        "screenshotWidth": crop_content.get("width", 0), "screenshotHeight": crop_content.get("height", 0),
+        "basedOnObservationId": crop_oid,
+    }}})
+    crop_click = recv(17)
+    crop_click_content = crop_click.get("result", {}).get("structuredContent", {})
+    check("click_at on the crop basis", crop_click_content.get("success") is True, crop_click)
+    print(f"     physical=({crop_click_content.get('physicalX')}, {crop_click_content.get('physicalY')})")
+
+    send({"jsonrpc": "2.0", "id": 18, "method": "tools/call", "params": {"name": "click_at", "arguments": {
+        "x": 5, "y": 5,
+        "screenshotWidth": crop_content.get("width", 0) * 2, "screenshotHeight": crop_content.get("height", 0),
+        "basedOnObservationId": crop_oid,
+    }}})
+    mismatch = recv(18)
+    mismatch_result = mismatch.get("result", {})
+    mismatch_text = mismatch_result.get("content", [{}])[0].get("text", "")
+    check("crop basis mismatch refused", mismatch_result.get("isError") is True and "basis mismatch" in mismatch_text, mismatch)
+
+    send({"jsonrpc": "2.0", "id": 19, "method": "tools/call", "params": {"name": "screen_shot", "arguments": {
+        "region": region,
+    }}})
+    lone_region = recv(19)
+    lone_result = lone_region.get("result", {})
+    lone_text = lone_result.get("content", [{}])[0].get("text", "")
+    check("region without basis refused", lone_result.get("isError") is True and "supplied together" in lone_text, lone_region)
 
     send({"jsonrpc": "2.0", "id": 15, "method": "ping"})
     ping = recv(15)

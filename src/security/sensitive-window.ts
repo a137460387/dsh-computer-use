@@ -30,6 +30,16 @@ export class SensitiveWindowPolicy {
     })
   }
 
+  /** Number of compiled blocklist patterns (readiness diagnostics). */
+  get blocklistSize(): number {
+    return this.blocked.length
+  }
+
+  /** Number of compiled allowlist patterns (readiness diagnostics). */
+  get allowlistSize(): number {
+    return this.allowed.length
+  }
+
   /**
    * The blocking pattern source for one window title, or undefined when the
    * title is allowed (allowlist wins) or matches nothing.

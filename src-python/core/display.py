@@ -225,12 +225,19 @@ def screenshot_point_to_physical(
     screenshot_width: int,
     screenshot_height: int,
     displays: list[DisplayInfo],
+    capture_region: tuple[int, int, int, int] | None = None,
 ) -> tuple[float, float, DisplayInfo]:
     """Map one screenshot-space point into the input API's coordinate space.
 
     Stage one scales the point into the virtual screen the capture covered;
     stage two resolves the target display and applies THAT display's local
     scale. Returns the mapped point and the display it landed on.
+
+    ``capture_region`` describes a zoom-crop observation: the screenshot
+    covers only that rectangle of the full capture (virtual-screen pixels),
+    so stage one scales the point into the rectangle instead of the whole
+    virtual screen. Stage two is unchanged — the mapped point is already in
+    virtual-screen space either way.
     """
     if screenshot_width <= 0 or screenshot_height <= 0:
         raise ValueError("screenshot dimensions must be positive")
@@ -238,15 +245,24 @@ def screenshot_point_to_physical(
         raise ValueError("no displays available")
 
     if sys.platform == "darwin":
+        if capture_region is not None:
+            raise ValueError("zoom-crop (region) captures are not supported on macOS in this release")
         return _macos_map(x, y, screenshot_width, screenshot_height, displays)
 
     # Windows: the PMv2-aware virtual screen is one physical-pixel space.
-    virtual_x = min(d.x for d in displays)
-    virtual_y = min(d.y for d in displays)
-    virtual_w = max(d.x + d.width for d in displays) - virtual_x
-    virtual_h = max(d.y + d.height for d in displays) - virtual_y
-    px = virtual_x + x * virtual_w / screenshot_width
-    py = virtual_y + y * virtual_h / screenshot_height
+    if capture_region is not None:
+        rx, ry, rw, rh = capture_region
+        if rw <= 0 or rh <= 0:
+            raise ValueError("capture region must have positive size")
+        px = rx + x * rw / screenshot_width
+        py = ry + y * rh / screenshot_height
+    else:
+        virtual_x = min(d.x for d in displays)
+        virtual_y = min(d.y for d in displays)
+        virtual_w = max(d.x + d.width for d in displays) - virtual_x
+        virtual_h = max(d.y + d.height for d in displays) - virtual_y
+        px = virtual_x + x * virtual_w / screenshot_width
+        py = virtual_y + y * virtual_h / screenshot_height
 
     target = next((d for d in displays if d.contains(px, py)), None)
     if target is None:

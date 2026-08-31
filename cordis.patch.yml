@@ -52,6 +52,9 @@
 #       healthCheckTimeoutMs: 5000
 #       autoApprovalWindowMs: 300000
 #       autoApprovalMaxGrants: 50
+#       actionVerification: 'off'      # off | sampled | always (advisory)
+#       actionVerificationSampleRate: 0.1
+#       actionVerificationSettleMs: 300
 #       auditLogPath: !!js dshHomePath('logs/dsh-cu-audit.log')
 #       screenshotArchivePath: !!js dshHomePath('logs/dsh-cu-screenshots')
 #       auditRetentionDays: 7

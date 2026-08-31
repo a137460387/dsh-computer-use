@@ -1,12 +1,20 @@
 /**
  * `click_at` tool (medium risk): clicks one screenshot-space point after
  * approval gating; the sidecar owns the DPI-aware per-display mapping.
+ * Optionally runs the advisory post-action semantic verification and, on a
+ * `no`/`uncertain` verdict, exactly one zoom-crop retry (both gated by the
+ * `actionVerification` config, default off).
  * @module dsh-computer-use/tools/click-at
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ObservationId } from '../definition/index.ts'
+import {
+  attemptZoomCropRetry,
+  runActionVerification,
+  shouldVerify,
+} from '../vision/verification.ts'
 import {
   computerUse,
   requestApproval,
@@ -85,9 +93,91 @@ export function registerClickAt(ctx: Context, deps: ToolDeps): void {
         ...args.basedOnObservationId !== undefined ? { basedOnObservationId: ObservationId(args.basedOnObservationId) } : {},
       })
       if (!result.success) throw new Error(`dsh-computer-use: click refused: ${result.message ?? 'unknown sidecar error'}`)
+
+      // Advisory post-action verification (default off): the flash route
+      // judges before/after frames, and a no/uncertain verdict may trigger
+      // exactly one zoom-crop retry. The click already executed; nothing
+      // below may block or re-approve it — failures degrade into the note.
+      const baseline = deps.previousShot
+      const basisId = deps.previousShotId
+      let note: string | undefined
+      if (
+        shouldVerify(deps.config)
+        && baseline !== undefined
+        && basisId !== undefined
+        && baseline.width === args.screenshotWidth
+        && baseline.height === args.screenshotHeight
+      ) {
+        const verdict = await runActionVerification({
+          vision: deps.vision,
+          settleMs: deps.config.actionVerificationSettleMs,
+          before: { data: baseline.data, width: baseline.width, height: baseline.height },
+          actionDescription: `click at (${args.x}, ${args.y})`,
+          captureAfter: () => computerUse(ctx).screenShot({
+            maxWidth: deps.config.screenshotMaxWidth,
+            quality: deps.config.screenshotQuality,
+          }),
+          signal: exec.signal,
+        })
+
+        let retried = false
+        let retryX: number | undefined
+        let retryY: number | undefined
+        let retryObservationId: string | undefined
+        if (verdict.verdict !== 'yes') {
+          const retry = await attemptZoomCropRetry({
+            vision: deps.vision,
+            point: { x: args.x, y: args.y },
+            frameWidth: baseline.width,
+            frameHeight: baseline.height,
+            captureCrop: rect => computerUse(ctx).screenShot({
+              maxWidth: deps.config.screenshotMaxWidth,
+              quality: deps.config.screenshotQuality,
+              region: rect,
+              regionOfObservationId: basisId,
+            }),
+            reclick: (x, y, crop) => computerUse(ctx).clickAt({
+              x,
+              y,
+              screenshotWidth: crop.width,
+              screenshotHeight: crop.height,
+              basedOnObservationId: crop.observationId,
+            }),
+            signal: exec.signal,
+          })
+          retried = retry.attempted
+          if (retry.attempted && retry.refined !== undefined) {
+            retryX = retry.refined.x
+            retryY = retry.refined.y
+            retryObservationId = retry.retryObservationId
+            note = ` Semantic verification: ${verdict.verdict} (${verdict.reason}).`
+              + ` Zoom-crop retry clicked (${retry.refined.x}, ${retry.refined.y}) in the crop;`
+              + ' the intended effect is still unconfirmed — capture a fresh screenshot to inspect.'
+          } else {
+            const why = retry.retryError ?? retry.skippedReason ?? 'unknown retry failure'
+            note = ` Semantic verification: ${verdict.verdict} (${verdict.reason}). Zoom-crop retry not executed: ${why}.`
+          }
+        } else {
+          note = ` Semantic verification confirmed the effect (${verdict.reason}).`
+        }
+
+        deps.auditor.recordVerification({
+          sessionId,
+          toolName: 'click_at',
+          verdict: verdict.verdict,
+          reason: verdict.reason,
+          retried,
+          ...retryX !== undefined ? { retryX } : {},
+          ...retryY !== undefined ? { retryY } : {},
+          ...retryObservationId !== undefined ? { retryObservationId } : {},
+        })
+      }
+
       return {
         success: true,
-        ...result.message !== undefined ? { message: result.message } : {},
+        ...result.message !== undefined || note !== undefined
+          ? { message: `${result.message ?? ''}${note ?? ''}`.trim() }
+          : {},
         durationMs: result.durationMs,
       }
     },
