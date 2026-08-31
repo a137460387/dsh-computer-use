@@ -16,10 +16,10 @@ This plugin gives a DSH agent desktop control for targets that browser/DOM tools
 
 ## Installation
 
-From the directory where `dsh` is available, install the local checkout into the `web` profile:
+Clone or place the repository into any local directory of your choice, then from the directory where `dsh` is available, install the local checkout into the `web` profile (substitute your actual path):
 
 ```sh
-dsh plugin --profile web add D:\code\Ai\fork\dsh-computer-use
+dsh plugin --profile web add <path-to-dsh-computer-use>
 ```
 
 `dsh plugin add` forwards to pnpm in the profile directory: it installs the `@modelcontextprotocol/sdk` dependency, links the `@deepseek-ai/*` peers through the dsh module fallback, and activates the bundle's `cordis.patch.yml` layer (the `computer-use` row).
@@ -109,11 +109,32 @@ Key facts:
 - **Takeover semantics**: while desktop control is paused, `click_at`/`type_text`/`scroll`/`hotkey` are refused with recovery guidance; `screen_shot`, `get_display_info`, and `resume_actions` stay available. Resume by pressing the takeover hotkey again or calling `resume_actions`. The pause state is pushed to the plugin as an MCP notification, audited (`lifecycle/paused`, `lifecycle/resumed`), and re-engaged automatically if the sidecar restarts.
 - **Sensitive-window semantics**: the sidecar checks the foreground window title BEFORE capturing; a hit refuses the screenshot without archiving, persisting, or model-sending any pixels, and writes a `danger/sensitive-window` audit line (title logged, screen content never).
 
+## Troubleshooting
+
+Documented failure modes with a cause and a remedy, collected here by symptom; inherent constraints without a remedy stay under Known Limitations.
+
+### Refused at startup or load
+
+- **Windows: the sidecar refuses to start when DSH runs as a background service (Session 0).** A harness running as a background service (NSSM, Task Scheduler, a Windows service) lives in session 0, which structurally cannot see or drive the interactive desktop: screen capture returns a disconnected fallback display, `BitBlt` grabs fail, and synthetic input never reaches the user's session. The sidecar detects this at startup (`ProcessIdToSessionId` vs `WTSGetActiveConsoleSessionId`) and refuses to start with the remedy instead of serving doomed captures. **Run DSH from a desktop terminal (a logged-in interactive session) for computer use to work**; do not attempt cross-session injection (`CreateProcessAsUser` and similar) — that is privilege escalation outside this plugin's boundary.
+- **Linux and headless environments are refused at load time** — there is no control backend.
+
+### Configuration and permissions
+
+- **The plugin refuses activation with copy-paste guidance.** The bundle ships UNCONFIGURED on purpose: the four model-route fields (`visionProvider`, `visionModel`, `changeDetectionProvider`, `changeDetectionModel`) default to the empty string and the plugin refuses activation until a deployment names its own routes. Fill them in the profile's `cordis.patch.yml` or the home-level `$DSH_HOME/cordis.patch.yml` (see Configuration).
+- **macOS: capture needs Screen Recording permission.** macOS requires Screen Recording permission for the terminal running DSH.
+
+### Sidecar mode
+
+- **The sidecar runs from the Python source instead of the production binary.** The provider prefers a production single-file binary at `bin/dsh-cu-server-<platform>.exe` and falls back to running the Python source (`python src-python/main.py`) when the binary is absent. If you expected the production binary, build it (see Sidecar binary) or force a mode with the `serverMode` config field (`dev` | `prod`) or the `DSH_CU_MODE` environment variable in a patch overlay.
+
+### Approval and pause refusals
+
+- **Actions are refused in a never-approval ("Full access") session.** High-risk actions — and medium-risk ones after the auto-approval quota is spent — require interactive confirmation; the host rejects never-approval sessions deterministically, and the tool surfaces that as configuration guidance (switch the session to Workspace Write) instead of a bare rejection. High-risk actions under Full access are fail-closed by design.
+- **An approved action is refused after clicking "allow".** A high-risk action's interactive approval is NOT an in-flight window: moving the mouse to click "allow" pauses desktop control, and the approved action is then refused until resumed (takeover hotkey again or `resume_actions`).
+
 ## Known Limitations
 
-- **Windows Session 0 cannot control the desktop.** A harness running as a background service (NSSM, Task Scheduler, a Windows service) lives in session 0, which structurally cannot see or drive the interactive desktop: screen capture returns a disconnected fallback display, `BitBlt` grabs fail, and synthetic input never reaches the user's session. The sidecar detects this at startup (`ProcessIdToSessionId` vs `WTSGetActiveConsoleSessionId`) and refuses to start with the remedy instead of serving doomed captures. **Run DSH from a desktop terminal (a logged-in interactive session) for computer use to work**; do not attempt cross-session injection (`CreateProcessAsUser` and similar) — that is privilege escalation outside this plugin's boundary.
-- **macOS screenshots cover the primary display only** (pyautogui capture behavior); multi-display macOS setups get primary-display coordinates. macOS also requires Screen Recording permission for the terminal running DSH, and non-ASCII typing is refused until a clipboard backend lands.
-- **Linux and headless environments are refused at load time** — there is no control backend.
+- **macOS screenshots cover the primary display only** (pyautogui capture behavior); multi-display macOS setups get primary-display coordinates. Non-ASCII typing is refused until a clipboard backend lands.
 - **Danger-pattern interception is regex-based** and can be spelled around; it exists to stop mis-fires, not adversaries.
 - The sidecar is a **single-instance executor**: concurrent tool calls serialize behind one queue.
 - The production binary is large (~90 MiB single-file PyInstaller bundle) and platform-specific; build it on the platform that runs it.
@@ -122,8 +143,6 @@ Key facts:
 - **The takeover hotkey is detected by a 50 ms poll.** The monitor samples `GetAsyncKeyState` every 50 ms, so a synthetic key press held for less than one poll interval (below ~100 ms) can fall between two samples and be missed; hold the combo for at least 100 ms when triggering the takeover programmatically.
 - **pause-on-user-input cannot tell automation from the user.** Detection watches real OS input events, so input injected by ANY automation counts as the user taking over and pauses the action tools — including the agent's OWN out-of-band automation (driving the UI through a shell tool like PowerShell UIAutomation instead of the computer-use tools), test drivers, other Computer Use sessions, and macro tools. Automated verification of this plugin must submit the task, then observe passively with zero input until the run finishes.
 - **Pause monitoring and the sensitive-window gate are Windows-only** (pure ctypes; no new dependencies). On macOS the monitor does not run (the takeover hotkey and user-input pause are unavailable; `resume_actions` still works) and the capture gate cannot read window titles, so capture is fail-open there.
-- **Pausing interacts with approval waits.** A high-risk action's interactive approval is NOT an in-flight window: moving the mouse to click "allow" pauses desktop control, and the approved action is then refused until resumed (hotkey again or `resume_actions`).
-- **Never-approval (Full access) sessions cannot run actions that need the seam.** High-risk actions — and medium-risk ones after the auto-approval quota is spent — require interactive confirmation; the host rejects never-approval sessions deterministically, and the plugin fails closed with guidance to switch the session to Workspace Write. This is intended: unattended Full access sessions keep working for in-quota medium actions while anything riskier stays blocked.
 - Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and seam-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, auto-approval grants, and lifecycle transitions are audited).
 
 ## Model Experience

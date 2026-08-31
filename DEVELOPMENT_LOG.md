@@ -194,10 +194,10 @@ config 值支持 `!!js` 表达式，在 Loader 注入上下文中求值：可用
   因此本机开发安装不能从 npm 拉取，`package.json` 携带 `pnpm.overrides`
   把 peer/dev 依赖 `link:` 到 `../deepseek-harness` 的源码目录（仅在本仓库
   作为根项目安装时生效，不影响消费者）。
-- **// TODO: 需确认**——`link:` 安装形态下，插件入口经 Loader 以 profile 为
-  parent URL 载入后，Node 对裸包名的解析基址是插件源码目录的 realpath；
-  若 profile 的 `node_modules` 不在其解析路径上，则须在本仓库本地
-  `pnpm install`（overrides 已备好）提供解析。Phase 3 安装验证时实测钉死。
+- **已钉死（Phase 5 真实环境验证 A 实测，见下文 P5-1 A）**——`link:` 安装形态下，
+  裸包名经插件源码目录自身的 `node_modules` 解析，由本仓库本地
+  `pnpm install`（overrides 已备好）提供：实测 `@modelcontextprotocol/sdk@1.30.0`
+  经 link 插件自身 node_modules 解析。
 - 第三方依赖 `@modelcontextprotocol/sdk` 声明为普通 `dependencies`，
   由 `dsh plugin add` 时 pnpm 安装（与 peer 不同，它不在 dsh 安装闭包中）。
 
