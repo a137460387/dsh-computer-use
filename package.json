@@ -28,20 +28,6 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-attachment": "*",
-    "@deepseek-ai/dsh-brand": "*",
-    "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-session": "*",
-    "@deepseek-ai/dsh-subprocess": "*",
-    "@deepseek-ai/dsh-timeout": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/dsh-user-approval": "*"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-attachment": "*",
     "@deepseek-ai/dsh-brand": "*",
@@ -51,7 +37,22 @@
     "@deepseek-ai/dsh-timeout": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-user-approval": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-attachment": "*",
+    "@deepseek-ai/dsh-brand": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
+    "@deepseek-ai/dsh-timeout": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-user-approval": "*",
+    "@deepseek-ai/schemastery": "*",
     "@types/node": "^22.20.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },

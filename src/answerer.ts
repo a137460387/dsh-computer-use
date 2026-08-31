@@ -55,8 +55,10 @@ export function registerAnswerer(ctx: Context, config: ComputerUseConfig): () =>
       state = { windowStartMs: nowMs, grants: 0 }
     }
     if (state.grants >= config.autoApprovalMaxGrants) {
-      // Quota spent: surface the rest of this window interactively.
-      states.delete(sessionId)
+      // Quota spent: keep the exhausted state so the rest of this window
+      // surfaces interactively; deleting it would re-arm a fresh quota and
+      // defeat the ceiling. The window-expiry branch above re-arms it later.
+      states.set(sessionId, state)
       return next()
     }
     states.set(sessionId, { windowStartMs: state.windowStartMs, grants: state.grants + 1 })

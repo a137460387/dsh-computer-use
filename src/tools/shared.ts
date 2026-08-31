@@ -82,25 +82,27 @@ export async function requestApproval(
   }
 }
 
-/**
- * System-shortcut combinations that always escalate to high risk: they drive
- * the operating system itself (run dialogs, settings, task manager, session
- * lock, window close), outside any application the task targets. This set is
- * a security invariant — fixed, not deployment-configurable.
- */
-const HIGH_RISK_HOTKEYS: ReadonlySet<string> = new Set([
-  'alt+f4',
-  'ctrl+shift+esc',
-  'win+i',
-  'win+l',
-  'win+r',
-  'win+x',
-])
-
 /** Canonical hotkey identity: lowercase keys joined in sorted order. */
 export function normalizeHotkey(keys: readonly string[]): string {
   return [...keys].map(key => key.toLowerCase()).sort().join('+')
 }
+
+/**
+ * System-shortcut combinations that always escalate to high risk: they drive
+ * the operating system itself (run dialogs, settings, task manager, session
+ * lock, window close), outside any application the task targets. This set is
+ * a security invariant — fixed, not deployment-configurable. Entries are
+ * stored in {@link normalizeHotkey} canonical form, so the comparison is
+ * independent of the key order the model happens to emit.
+ */
+const HIGH_RISK_HOTKEYS: ReadonlySet<string> = new Set([
+  ['alt', 'f4'],
+  ['ctrl', 'shift', 'esc'],
+  ['win', 'i'],
+  ['win', 'l'],
+  ['win', 'r'],
+  ['win', 'x'],
+].map(keys => normalizeHotkey(keys)))
 
 /** Whether one key combination escalates to high risk. */
 export function isHighRiskHotkey(keys: readonly string[]): boolean {

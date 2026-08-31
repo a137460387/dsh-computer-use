@@ -5,6 +5,7 @@ node_modules/
 bin/
 dist/
 lib/
+build/
 *.tsbuildinfo
 
 # Test/tooling residue

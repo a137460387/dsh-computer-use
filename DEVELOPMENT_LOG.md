@@ -291,3 +291,61 @@ session 0「services/Disc」，交互桌面在 session 1「console/Active」）�
 `next()` 委托交互 Answerer（无交互 Answerer 时按 approval 缝语义
 fail-closed 为 unavailable）。两端都在本插件内，契约文档化于
 `src/answerer.ts`。
+
+## Phase 3 交付结论（打包、文档、测试与真实环境验证）
+
+### P3-1：PyInstaller 打包脚本与产物
+
+`scripts/build-python.py`（`pnpm run build:python`）：检测 PyInstaller（未装打印
+`pip install pyinstaller` 指引）→ 校验 sidecar 运行时依赖（pyautogui/PIL）→
+清理 `bin/` 旧产物与 `build/pyinstaller/` → `--onefile --console` 打包
+（stdio MCP 协议必须保留 stdin/stdout，不能 `--windowed`）→ 打印产物路径、
+大小与 SHA256。产物命名与 Node 侧 `platformTag()` 解析对齐：
+`bin/dsh-cu-server-win-x64.exe`（Windows）/ `bin/dsh-cu-server-macos-<arch>`。
+
+实测（PyInstaller 6.22.2，Python 3.10.6）：打包成功，产物 89.5 MiB，
+SHA256 `caf54a3d4035f1384cf841b2186aac4c5167b9e3e84b7eee9dd07391dc04815c`。
+对产物做了 stdio 冒烟（initialize 握手 + tools/list 七工具面 + ping +
+干净退出 exit 0）——当前会话已运行在交互桌面（Session 1），交互会话守卫
+放行，与部署状态一致。
+
+### P3-2：单元测试与覆盖率
+
+新增 `vitest.config.ts` 与 10 个 spec 文件（91 用例全绿，`npx tsc --noEmit`
+零错误）。覆盖率（v8，分母限定为 definition/security/vision 三个可单测的
+核心模块；provider-mcp 与工具注册属集成层，由冒烟脚本覆盖）：
+
+- definition 100% / security 96.1% lines / vision 89.0% lines，总体 92.54%。
+- 关键逻辑均有断言：dHash 汉明距离（含 64 位满距、对称性）、熔断器
+  触发/释放/复位、危险正则默认集全量拦截与误报放行、ObservationId TTL
+  过期（fake timers）与过期事件、审计日志串行追加/保留期清扫（日志行与
+  截图归档）、视觉决策 JSON 校验全拒绝路径、审批 answerer 窗口/配额。
+
+### P3-3：Phase 2 遗留的两个安全缺陷（本阶段修复）
+
+1. **高危快捷键升级失效**（`src/tools/shared.ts`）：`normalizeHotkey` 排序
+   后拼接，但 `HIGH_RISK_HOTKEYS` 存的是书写顺序——`win+r` 排序成 `r+win`
+   后查不到，6 个系统快捷键里只有 `alt+f4` 能升级，其余落入 medium 被
+   answerer 自动放行。修复：集合改为由按键数组经 `normalizeHotkey` 派生，
+   与查询侧同构。新增 `tests/tools/shared.spec.ts` 覆盖全部 6 组合的
+   任意顺序/大小写升级与超集不升级。
+2. **审批配额可重置绕过**（`src/answerer.ts`）：配额耗尽时
+   `states.delete(sessionId)` 后 `next()`，下一个 medium 请求会新建窗口
+   重新自动放行，`autoApprovalMaxGrants` 上限形同虚设。修复：保留耗尽态
+   直至窗口过期分支重置。新增 `tests/answerer.spec.ts` 断言耗尽后同窗口
+   持续委托、跨会话独立、窗口过期后重新武装。
+
+### P3-4：文档
+
+`README.md` 五章节齐备（Purpose / Installation / Configuration / Known
+Limitations / Model Experience）；Known Limitations 钉死 Windows Session 0
+限制（后台服务无截屏/输入权限，必须前台桌面终端运行，禁止跨会话注入）、
+macOS 主屏限制、Linux 拒绝加载、正则拦截非安全边界、单实例执行器、
+二进制体积。配置章节给出完整 `cordis.patch.yml` 覆盖模板并强调四个视觉
+路由字段默认空、未配置即拒绝激活。
+
+### P3-5：真实环境验证（待用户在桌面执行）
+
+步骤 A–D（安装、`--dump-config` 层叠确认、重启加载、Web UI 发起
+Computer Use 任务观察 sidecar 拉起/真实鼠标动作/审计日志）已输出给用户，
+等待反馈。
