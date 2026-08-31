@@ -166,6 +166,7 @@ export function registerClickAt(ctx: Context, deps: ToolDeps): void {
           toolName: 'click_at',
           verdict: verdict.verdict,
           reason: verdict.reason,
+          ...verdict.tier !== undefined ? { modelTier: verdict.tier } : {},
           retried,
           ...retryX !== undefined ? { retryX } : {},
           ...retryY !== undefined ? { retryY } : {},

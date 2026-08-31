@@ -27,6 +27,7 @@ import { stepCounter, type ToolDeps } from './src/tools/shared.ts'
 import { registerScroll } from './src/tools/scroll.ts'
 import { registerTypeText } from './src/tools/type-text.ts'
 import { ChangeDetector } from './src/vision/change-detector.ts'
+import { VisionRouter } from './src/vision/router.ts'
 import { createVisionProvider } from './src/vision/vision-provider.ts'
 
 export { Config } from './src/config.ts'
@@ -119,7 +120,8 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
 
   const dangerFilter = new DangerFilter(config.dangerPatterns)
   const breaker = new FailureDetector(config.consecutiveFailureCount, config.similarityThreshold)
-  const vision = createVisionProvider(ctx, config)
+  const router = new VisionRouter(config)
+  const vision = createVisionProvider(ctx, config, router)
   const changeDetector = new ChangeDetector(vision, config.similarityThreshold)
 
   // Direct construction (the ApprovalService precedent): ctx.plugin forwards

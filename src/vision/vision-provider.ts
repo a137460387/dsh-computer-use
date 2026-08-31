@@ -1,6 +1,9 @@
 /**
  * Vision model integration: screenshot analysis and change detection through
  * the harness's unified `ctx.llm` service on deployment-configured routes.
+ * Every call resolves its route by purpose through the {@link VisionRouter}:
+ * the purpose picks a cost tier from config, and the tier rides one of the
+ * two deployment routes.
  *
  * Image delivery contract: screenshot bytes ALWAYS persist through
  * `ctx.attachments.saveImage()` first and reach the model as durable
@@ -16,6 +19,7 @@ import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { deadline } from '@deepseek-ai/dsh-timeout'
 import type { ComputerUseConfig } from '../config.ts'
+import type { VisionRoute, VisionRouter, VisionTier } from './router.ts'
 
 /** One raster for vision calls: encoded bytes plus their coordinate basis. */
 export interface VisionImage {
@@ -51,43 +55,59 @@ export interface ActionEffectVerdict {
   readonly reason: string
 }
 
+/** One effect verdict plus the tier of the vision call that produced it. */
+export interface TieredVerdict extends ActionEffectVerdict {
+  /**
+   * The tier of the call that produced the verdict. Absent when the verdict
+   * degraded before any model call (or on unrouted test fakes); the
+   * production provider always sets it.
+   */
+  readonly tier?: VisionTier
+}
+
 /** Vision calls over the harness LLM seam. */
 export interface VisionProvider {
   /**
-   * Analyze one screenshot and return the structured next action.
+   * Analyze one screenshot and return the structured next action, on the
+   * route of the configured analysis tier.
    * @param image - the frame to analyze.
    * @param taskPrompt - what the model should accomplish on this screen.
    * @param signal - caller cancellation.
+   * @param tier - explicit routing override; bypasses the configured analysis tier.
    * @returns the validated structured decision.
    */
-  analyzeScreenshot(image: VisionImage, taskPrompt: string, signal?: AbortSignal): Promise<ScreenAnalysis>
+  analyzeScreenshot(image: VisionImage, taskPrompt: string, signal?: AbortSignal, tier?: VisionTier): Promise<ScreenAnalysis>
 
   /**
-   * Decide whether the screen changed meaningfully between two frames.
+   * Decide whether the screen changed meaningfully between two frames, on the
+   * route of the configured change-detection tier.
    * @param before - the pre-action frame.
    * @param after - the post-action frame.
    * @param signal - caller cancellation.
+   * @param tier - explicit routing override; bypasses the configured change-detection tier.
    * @returns true when the screen changed.
    */
-  detectChange(before: VisionImage, after: VisionImage, signal?: AbortSignal): Promise<boolean>
+  detectChange(before: VisionImage, after: VisionImage, signal?: AbortSignal, tier?: VisionTier): Promise<boolean>
 
   /**
    * Judge whether one executed action produced its intended effect by
-   * comparing the frames around it, on the change-detection route. Never
-   * throws: an unusable model answer or call failure degrades to
-   * `uncertain` — verification is advisory, never a gate.
+   * comparing the frames around it, on the route of the configured
+   * verification tier. Never throws: an unusable model answer or call
+   * failure degrades to `uncertain` — verification is advisory, never a gate.
    * @param before - the pre-action frame.
    * @param after - the post-action frame.
    * @param actionDescription - sanitized summary of the executed action.
    * @param signal - caller cancellation.
-   * @returns the verdict plus its one-line justification.
+   * @param tier - explicit routing override; bypasses the configured verification tier.
+   * @returns the verdict plus its one-line justification and the tier that produced them.
    */
   verifyActionEffect(
     before: VisionImage,
     after: VisionImage,
     actionDescription: string,
     signal?: AbortSignal,
-  ): Promise<ActionEffectVerdict>
+    tier?: VisionTier,
+  ): Promise<TieredVerdict>
 }
 
 /** Capability-owned timeout reason code for auxiliary vision requests. */
@@ -150,7 +170,7 @@ function visionMessage(refs: readonly ImageAttachmentRef[], text: string): Messa
 async function streamToText(
   ctx: Context,
   config: ComputerUseConfig,
-  route: { provider: string; model: string },
+  route: VisionRoute,
   system: string,
   messages: Message[],
   signal: AbortSignal | undefined,
@@ -275,17 +295,19 @@ function toActionEffectVerdict(raw: Record<string, unknown>): ActionEffectVerdic
 /**
  * Build the deployment's VisionProvider over `ctx.llm` and `ctx.attachments`.
  * @param ctx - context carrying the LLM and attachment services.
- * @param config - validated policy (routes, token cap, deadline).
- * @returns the provider; routes resolve per call, so late settings edits apply.
+ * @param config - validated policy (token cap, deadline).
+ * @param router - purpose-to-route decisions; routes resolve per call, so late settings edits apply.
+ * @returns the provider.
  */
-export function createVisionProvider(ctx: Context, config: ComputerUseConfig): VisionProvider {
+export function createVisionProvider(ctx: Context, config: ComputerUseConfig, router: VisionRouter): VisionProvider {
   return {
-    async analyzeScreenshot(image, taskPrompt, signal) {
+    async analyzeScreenshot(image, taskPrompt, signal, tier) {
+      const decision = router.decide('analysis', tier)
       const ref = await persistImage(ctx, image, 'cu-vision-analysis.jpg')
       const text = await streamToText(
         ctx,
         config,
-        { provider: config.visionProvider, model: config.visionModel },
+        decision.route,
         ANALYSIS_SYSTEM_PROMPT,
         [visionMessage([ref], `Screenshot: ${image.width}x${image.height}px.\nTask: ${taskPrompt}`)],
         signal,
@@ -293,7 +315,8 @@ export function createVisionProvider(ctx: Context, config: ComputerUseConfig): V
       return toScreenAnalysis(extractJsonObject(text), image)
     },
 
-    async detectChange(before, after, signal) {
+    async detectChange(before, after, signal, tier) {
+      const decision = router.decide('change-detection', tier)
       const [beforeRef, afterRef] = await Promise.all([
         persistImage(ctx, before, 'cu-vision-before.jpg'),
         persistImage(ctx, after, 'cu-vision-after.jpg'),
@@ -301,7 +324,7 @@ export function createVisionProvider(ctx: Context, config: ComputerUseConfig): V
       const text = await streamToText(
         ctx,
         config,
-        { provider: config.changeDetectionProvider, model: config.changeDetectionModel },
+        decision.route,
         CHANGE_SYSTEM_PROMPT,
         [visionMessage([beforeRef, afterRef], 'Did the screen change meaningfully between these two screenshots?')],
         signal,
@@ -309,7 +332,8 @@ export function createVisionProvider(ctx: Context, config: ComputerUseConfig): V
       return /\bCHANGED\b/i.test(text) && !/\bUNCHANGED\b/i.test(text)
     },
 
-    async verifyActionEffect(before, after, actionDescription, signal) {
+    async verifyActionEffect(before, after, actionDescription, signal, tier) {
+      const decision = router.decide('verification', tier)
       // Advisory contract: nothing below may surface as a thrown failure —
       // every degraded path becomes an `uncertain` verdict with its reason.
       try {
@@ -320,14 +344,14 @@ export function createVisionProvider(ctx: Context, config: ComputerUseConfig): V
         const text = await streamToText(
           ctx,
           config,
-          { provider: config.changeDetectionProvider, model: config.changeDetectionModel },
+          decision.route,
           VERIFICATION_SYSTEM_PROMPT,
           [visionMessage([beforeRef, afterRef], `Action executed: ${actionDescription}\nDid its intended effect happen?`)],
           signal,
         )
-        return toActionEffectVerdict(extractJsonObject(text))
+        return { ...toActionEffectVerdict(extractJsonObject(text)), tier: decision.tier }
       } catch (error) {
-        return { verdict: 'uncertain', reason: `verification unavailable: ${String(error)}` }
+        return { verdict: 'uncertain', reason: `verification unavailable: ${String(error)}`, tier: decision.tier }
       }
     },
   }

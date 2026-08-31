@@ -777,3 +777,102 @@ crop observationId）。
 3. `click_at` "调用方主动请求重试"参数属模型可见签名变更，待核准。
 4. region 捕获的 macOS 支持（需 mac 实测定标），现 fail-closed 拒绝。
 5. 上游 fork 工作区存在 `.dsh-cu-tmp/` 未跟踪目录，属上游仓库范围，未触碰。
+
+## Phase 8 交付结论（flash/pro 视觉调用成本分级路由，2026-09-01）
+
+### P8-1：动机与范围
+
+0.1.3 的两个视觉调用点各自硬编码路由：`analyzeScreenshot` 固定走
+`visionProvider/visionModel`（本机部署 = qwen3.8-max，"pro"档），
+`detectChange` 与 `verifyActionEffect` 固定走
+`changeDetectionProvider/changeDetectionModel`（= glm-5.3-flash，"flash"档）。
+本轮把「用途 → 档位 → 路由」抽成可配置的分级路由层，使部署可以按成本
+偏好改派任一用途（例如验证升 pro、分析降 flash），同时**默认值完全复刻
+原固定分配，不改任何现有调用点的默认路由与成本**。
+
+用户核准的范围收窄：本轮只做三档位路由 + 简化可观测性；
+**不实现** "flash 判定 uncertain 自动升级 pro 重判" 的升级路径
+（那会改变待办4刚上线的 verification 流程默认行为，用户裁定留待未来
+单独立项）。
+
+### P8-2：路由设计
+
+**档位语义**：`flash` = changeDetection 路由（便宜档），`pro` = vision
+路由（主力档）。档位是成本类别，路由身份仍是既有四个字段，不新增路由。
+
+**新模块 `src/vision/router.ts`**（内部逻辑，非模型可见工具）：
+`VisionTier = 'flash' | 'pro'`、`VisionPurpose = 'analysis' |
+'change-detection' | 'verification'`；`VisionRouter.decide(purpose,
+explicitTier?)` 返回档位 + 解析后的路由 + `overridden` 标志。两个
+「用途→档位字段」与「档位→路由字段」映射是编译期穷尽的 `Record`
+数据表（闭联合上类型即穷尽，无需运行时兜底分支——这也是覆盖率不回归
+所需，`assertNever` 默认分支在覆盖率分母内不可达）。
+
+**三个新配置项**（扁平枚举，风格对齐 `actionVerification` 系列）：
+
+- `analysisTier`（默认 `pro`）：`analyzeScreenshot`——精定位需要精度。
+- `changeDetectionTier`（默认 `flash`）：`detectChange`——粗粒度判断。
+- `verificationTier`（默认 `flash`）：`verifyActionEffect`——粗粒度判断。
+
+**接线**：`createVisionProvider(ctx, config, router)`——三个方法各自
+`router.decide(<purpose>)` 解析路由后走既有 `streamToText`；
+`apply()` 构造 `VisionRouter` 并注入。三个方法签名追加**尾部可选**
+`tier?: VisionTier` 显式覆盖参数：显式档位绕过配置路由（测试/诊断用，
+生产调用点均不传），生产行为与 `VisionProvider` 的既有契约（返回形状、
+永不抛出降级、图片附件契约）全部不变。
+
+**档位留痕**：`verifyActionEffect` 返回 `TieredVerdict`
+（`ActionEffectVerdict` + 可选 `tier`）；`runActionVerification` 原样
+穿透（模型调用前的降级路径不带档位，因为根本没发起调用）；两个工具侧
+审计调用点把 `tier` 写进 `verification/result` 行的新可选字段
+`modelTier`。未新增独立审计通道：`analyzeScreenshot` 当前唯一生产调用点
+（zoom-crop）默认关闭、无实际流量，为尚未真正发生调用的路径预建通道
+意义不大（用户核准的简化方案）。
+
+### P8-3：成本影响（显式结论）
+
+- **无任何调用点默认变贵**：三个用途的默认档位逐一等于原固定路由
+  （验证=flash、变化检测=flash、分析=pro）。
+- **TODO-4 verification 流程零改变**：无升级路径，判定、重试触发、
+  降级行为与 0.1.3 逐字节一致；唯一新增是该审计行可能携带 `modelTier`
+  字段（新通道行为，不改模型/工具行为）。
+- **模型可见工具（8 个）零变化**：未改任何工具名称/签名/schema。
+
+### P8-4：Known Limitation ③ 核对
+
+不受影响，未改：`analyzeScreenshot` 仍是"一个可选生产调用点（zoom-crop
+精定位，默认关闭）"；审计枚举句无需更新（`modelTier` 记在既有
+`verification/result` 行上，没有新通道）。
+
+### P8-5：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误。
+- `vitest run` 213/213（194 旧 + 19 新：router 11、vision-provider
+  档位路由 7、verification 档位穿透 1；另改 2 处既有的 toEqual 断言以
+  容纳返回合约新增的 `tier`）。
+- 覆盖率（分母含新增 `src/vision/router.ts`，该文件 100%）：语句
+  95.30%（基线 95.16%）/ 分支 86.43%（86.22%）/ 函数 97.95%（97.87%）/
+  行 95.95%（95.82%）——四项均不低于基线；基线数字已在同环境对干净
+  HEAD（stash 法）复核复现。
+- `python -m unittest discover -s tests/python` 63/63（路由为纯 Node
+  侧，Python 面无变化）。
+- 新增单测覆盖任务要求的三类断言：默认路由的档位分配、配置改派与显式
+  覆盖（升级/降级路径本轮不实现，无对应断言）、路由决策经 `modelTier`
+  正确落审计。
+
+### P8-6：只记录（本轮未动）
+
+1. **升级路径未实现**（用户裁定）：flash 判定 uncertain 时升级 pro 重判
+   一次，可用一次 pro 调用省掉更贵的 zoom-crop 重试 + 一次额外物理点击；
+   但它改变待办4流程默认行为且默认成本可能上升（uncertain 率未知），
+   未来立项时需单独核准默认值。
+2. **change-detection 调用的档位无逐次留痕**（简化可观测性的代价）：
+   `detectChange` 没有审计行；未来若引入独立 `vision/call` 通道，
+   与 `analyzeScreenshot` 调用点一并评估。
+3. **zoom-crop 精定位调用的档位未单独记录**：可由 `retried: true` +
+   `analysisTier` 配置推导；若未来 `analysisTier` 改派导致成本画像变化，
+   再补充逐次记录。
+4. `vision-provider.ts` 既有未覆盖的校验抛出分支（与基线完全一致，
+   18 处未覆盖语句逐行比对无新增），本轮未扩。
+5. 档位配置指向无 image 能力的路由时，`ctx.llm` 会把图片投影为占位文本
+   （既有行为），路由层不做额外能力校验——改派是部署的显式选择。

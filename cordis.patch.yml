@@ -23,6 +23,12 @@
 #       visionModel: <vision-capable model id>       # must advertise image input
 #       changeDetectionProvider: <your provider route>
 #       changeDetectionModel: <cheap model id>
+#       # Vision calls route by purpose onto the two routes above: each tier
+#       # field takes flash (change-detection route) or pro (vision route);
+#       # the defaults preserve the fixed pre-routing assignment.
+#       analysisTier: pro              # analyzeScreenshot (coordinate localization)
+#       changeDetectionTier: flash     # detectChange (screen-change judgement)
+#       verificationTier: flash        # verifyActionEffect (post-action verdicts)
 #       visionMaxOutputTokens: 2048
 #       visionTimeoutMs: 120000
 #       maxSteps: 30

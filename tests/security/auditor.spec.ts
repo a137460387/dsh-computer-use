@@ -190,7 +190,7 @@ describe('createAuditor', () => {
     expect(lines[0]).toMatchObject({ kind: 'action/before', actionType: 'scroll', detail: 'fresh' })
   })
 
-  it('records a verification verdict with its retry facts', async () => {
+  it('records a verification verdict with its retry facts and model tier', async () => {
     const ctx = new Context()
     const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
     const auditor = createAuditor(ctx, config)
@@ -200,6 +200,7 @@ describe('createAuditor', () => {
       toolName: 'click_at',
       verdict: 'uncertain',
       reason: 'no visible response',
+      modelTier: 'flash',
       retried: true,
       retryX: 161,
       retryY: 92,
@@ -214,12 +215,13 @@ describe('createAuditor', () => {
       toolName: 'click_at',
       verdict: 'uncertain',
       reason: 'no visible response',
+      modelTier: 'flash',
       retried: true,
       retryX: 161,
       retryY: 92,
       retryObservationId: 'crop-1',
     })
-    // A verdict without retry facts omits them instead of logging undefined.
+    // A verdict without retry facts or a tier omits them instead of logging undefined.
     expect(Object.keys(lines[1] ?? {}).sort()).toEqual(['kind', 'retried', 'timestamp', 'toolName', 'verdict'])
   })
 

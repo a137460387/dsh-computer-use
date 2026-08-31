@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { RiskTier } from '../answerer.ts'
 import type { ComputerUseConfig } from '../config.ts'
 import type { AfterActionEvent, BeforeActionEvent } from '../definition/index.ts'
+import type { VisionTier } from '../vision/router.ts'
 
 /** Extra audit facts for one danger-intercepted payload. */
 export interface DangerAuditRecord {
@@ -53,10 +54,15 @@ export interface VerificationAuditRecord {
   readonly sessionId?: string
   /** The tool whose action was verified. */
   readonly toolName: string
-  /** The flash model's verdict on whether the intended effect happened. */
+  /** The verdict on whether the intended effect happened. */
   readonly verdict: 'yes' | 'no' | 'uncertain'
   /** The model's one-line justification, when one survived parsing. */
   readonly reason?: string
+  /**
+   * Model tier of the call that produced the verdict; absent when the
+   * verdict degraded before any model call.
+   */
+  readonly modelTier?: VisionTier
   /** Whether the verdict triggered a zoom-crop click retry. */
   readonly retried: boolean
   /** Retry click point in crop pixels, present once a retry executed. */
@@ -285,6 +291,7 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         toolName: record.toolName,
         verdict: record.verdict,
         ...record.reason !== undefined ? { reason: record.reason } : {},
+        ...record.modelTier !== undefined ? { modelTier: record.modelTier } : {},
         retried: record.retried,
         ...record.retryX !== undefined ? { retryX: record.retryX } : {},
         ...record.retryY !== undefined ? { retryY: record.retryY } : {},

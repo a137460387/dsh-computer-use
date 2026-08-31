@@ -2,11 +2,12 @@
  * Post-action semantic verification and the zoom-crop click retry.
  *
  * Advisory orchestration the action tools run AFTER a successful dispatch:
- * the change-detection route (the deployment's cheap flash model) judges
- * whether the intended effect happened between the before/after frames
- * (`yes`/`no`/`uncertain`), and a `no`/`uncertain` verdict on `click_at`
- * may trigger exactly one zoom-crop retry — a magnified capture around the
- * target that the primary vision model relocalizes before a single re-click.
+ * the verification tier's route (by default the deployment's cheap flash
+ * model) judges whether the intended effect happened between the
+ * before/after frames (`yes`/`no`/`uncertain`), and a `no`/`uncertain`
+ * verdict on `click_at` may trigger exactly one zoom-crop retry — a
+ * magnified capture around the target that the analysis tier's model (by
+ * default the primary vision model) relocalizes before a single re-click.
  * Both layers are gated by the `actionVerification` config (default `off`)
  * and never block, throw into, or re-approve the action they annotate.
  * @module dsh-computer-use/vision/verification
@@ -15,7 +16,7 @@
 import type { ComputerUseConfig } from '../config.ts'
 import type { ActionResult, ScreenShot } from '../definition/index.ts'
 import { zoomCropRefinementPrompt } from './vision-provider.ts'
-import type { ActionEffectVerdict, VisionImage, VisionProvider } from './vision-provider.ts'
+import type { TieredVerdict, VisionImage, VisionProvider } from './vision-provider.ts'
 
 /** Determinism hook for the `sampled` mode; one draw per candidate action. */
 export type VerificationRandom = () => number
@@ -115,9 +116,10 @@ export interface RunVerificationOptions {
  * Run one post-action semantic verification. Never throws: every degraded
  * path returns an `uncertain` verdict carrying its reason.
  * @param opts - verification inputs.
- * @returns the flash model's verdict (or the degraded substitute).
+ * @returns the verdict with the tier that produced it when a model call
+ * happened (or the degraded substitute, which names no tier).
  */
-export async function runActionVerification(opts: RunVerificationOptions): Promise<ActionEffectVerdict> {
+export async function runActionVerification(opts: RunVerificationOptions): Promise<TieredVerdict> {
   const sleep = opts.sleep ?? settle
   try {
     await sleep(opts.settleMs, opts.signal)

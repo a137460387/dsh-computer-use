@@ -4,10 +4,17 @@ import type { ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-a
 import type { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createVisionProvider } from '../../src/vision/vision-provider.ts'
-import type { VisionImage } from '../../src/vision/vision-provider.ts'
+import type { VisionImage, VisionProvider } from '../../src/vision/vision-provider.ts'
+import { VisionRouter } from '../../src/vision/router.ts'
 import { testConfig } from '../helpers.ts'
 
 const image: VisionImage = { data: new Uint8Array([1, 2, 3]), width: 640, height: 480 }
+
+/** Provider wired over a VisionRouter for the given config overrides. */
+function routedProvider(ctx: Context, overrides: Record<string, unknown> = {}): VisionProvider {
+  const config = testConfig(overrides)
+  return createVisionProvider(ctx, config, new VisionRouter(config))
+}
 
 /** Fake ctx capturing saved images and the options of the last stream call. */
 function fakeCtx(chunks: StreamChunk[]): {
@@ -52,7 +59,7 @@ function textChunks(text: string): StreamChunk[] {
 describe('createVisionProvider.analyzeScreenshot', () => {
   it('parses a click decision and validates coordinates against the frame', async () => {
     const { ctx, saved, options } = fakeCtx(textChunks('{"action":"click","x":10,"y":20,"reason":"the button"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
 
     const analysis = await provider.analyzeScreenshot(image, 'open the app')
 
@@ -64,38 +71,38 @@ describe('createVisionProvider.analyzeScreenshot', () => {
 
   it('parses a done decision without coordinates', async () => {
     const { ctx } = fakeCtx(textChunks('{"action":"done","reason":"task complete"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 'finish'))
       .resolves.toMatchObject({ action: 'done', reason: 'task complete' })
   })
 
   it('rejects an unknown action', async () => {
     const { ctx } = fakeCtx(textChunks('{"action":"fly","reason":"x"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/unknown action/)
   })
 
   it('rejects a decision missing its reason', async () => {
     const { ctx } = fakeCtx(textChunks('{"action":"done"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/reason/)
   })
 
   it('rejects coordinates outside the screenshot', async () => {
     const { ctx } = fakeCtx(textChunks('{"action":"click","x":9999,"y":5,"reason":"r"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/outside screenshot width/)
   })
 
   it('rejects a click missing coordinates', async () => {
     const { ctx } = fakeCtx(textChunks('{"action":"click","reason":"r"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/missing coordinates/)
   })
 
   it('rejects output without a JSON object', async () => {
     const { ctx } = fakeCtx(textChunks('no json here'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/no JSON object/)
   })
 
@@ -104,14 +111,14 @@ describe('createVisionProvider.analyzeScreenshot', () => {
       { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'X' } } },
     ]
     const { ctx } = fakeCtx(chunks)
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/boom/)
   })
 
   it('rejects a truncated (max-tokens) response', async () => {
     const chunks: StreamChunk[] = [{ type: 'finish', reason: { kind: 'max-tokens' } }]
     const { ctx } = fakeCtx(chunks)
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.analyzeScreenshot(image, 't')).rejects.toThrow(/truncated/)
   })
 })
@@ -119,7 +126,7 @@ describe('createVisionProvider.analyzeScreenshot', () => {
 describe('createVisionProvider.detectChange', () => {
   it('persists both frames and returns true on CHANGED', async () => {
     const { ctx, saved, options } = fakeCtx(textChunks('CHANGED'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
 
     await expect(provider.detectChange(image, image)).resolves.toBe(true)
     expect(saved).toHaveLength(2)
@@ -129,13 +136,13 @@ describe('createVisionProvider.detectChange', () => {
 
   it('returns false on UNCHANGED', async () => {
     const { ctx } = fakeCtx(textChunks('UNCHANGED'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.detectChange(image, image)).resolves.toBe(false)
   })
 
   it('returns false when the answer is ambiguous', async () => {
     const { ctx } = fakeCtx(textChunks('CHANGED and also UNCHANGED'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.detectChange(image, image)).resolves.toBe(false)
   })
 })
@@ -143,10 +150,10 @@ describe('createVisionProvider.detectChange', () => {
 describe('createVisionProvider.verifyActionEffect', () => {
   it('parses a yes verdict on the change-detection route and persists both frames', async () => {
     const { ctx, saved, options } = fakeCtx(textChunks('{"verdict":"yes","reason":"the dialog appeared"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
 
     await expect(provider.verifyActionEffect(image, image, 'click at (10, 10)'))
-      .resolves.toEqual({ verdict: 'yes', reason: 'the dialog appeared' })
+      .resolves.toEqual({ verdict: 'yes', reason: 'the dialog appeared', tier: 'flash' })
     expect(saved).toHaveLength(2)
     expect(options()?.provider).toBe('cp')
     expect(options()?.model).toBe('cm')
@@ -154,14 +161,14 @@ describe('createVisionProvider.verifyActionEffect', () => {
 
   it('parses no and uncertain verdicts', async () => {
     const { ctx } = fakeCtx(textChunks('{"verdict":"no","reason":"nothing moved"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     await expect(provider.verifyActionEffect(image, image, 'hotkey ctrl+c'))
-      .resolves.toEqual({ verdict: 'no', reason: 'nothing moved' })
+      .resolves.toEqual({ verdict: 'no', reason: 'nothing moved', tier: 'flash' })
   })
 
   it('degrades an unknown verdict to uncertain instead of throwing', async () => {
     const { ctx } = fakeCtx(textChunks('{"verdict":"maybe","reason":"x"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     const verdict = await provider.verifyActionEffect(image, image, 'scroll down')
     expect(verdict.verdict).toBe('uncertain')
     expect(verdict.reason).toContain('unknown verdict')
@@ -169,7 +176,7 @@ describe('createVisionProvider.verifyActionEffect', () => {
 
   it('degrades a verdict missing its reason to uncertain', async () => {
     const { ctx } = fakeCtx(textChunks('{"verdict":"yes"}'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     const verdict = await provider.verifyActionEffect(image, image, 'click')
     expect(verdict.verdict).toBe('uncertain')
     expect(verdict.reason).toContain('reason')
@@ -177,7 +184,7 @@ describe('createVisionProvider.verifyActionEffect', () => {
 
   it('degrades output without a JSON object to uncertain', async () => {
     const { ctx } = fakeCtx(textChunks('looks fine to me'))
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     const verdict = await provider.verifyActionEffect(image, image, 'click')
     expect(verdict.verdict).toBe('uncertain')
     expect(verdict.reason).toContain('no JSON object')
@@ -188,9 +195,70 @@ describe('createVisionProvider.verifyActionEffect', () => {
       { type: 'finish', reason: { kind: 'error', failure: { message: 'route down', code: 'X' } } },
     ]
     const { ctx } = fakeCtx(chunks)
-    const provider = createVisionProvider(ctx, testConfig())
+    const provider = routedProvider(ctx)
     const verdict = await provider.verifyActionEffect(image, image, 'click')
     expect(verdict.verdict).toBe('uncertain')
     expect(verdict.reason).toContain('route down')
+  })
+
+  it('keeps the routed tier on a degraded verdict', async () => {
+    const chunks: StreamChunk[] = [
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'route down', code: 'X' } } },
+    ]
+    const { ctx } = fakeCtx(chunks)
+    const provider = routedProvider(ctx, { verificationTier: 'pro' })
+    const verdict = await provider.verifyActionEffect(image, image, 'click')
+    expect(verdict.tier).toBe('pro')
+  })
+})
+
+describe('createVisionProvider tier routing', () => {
+  it('routes analysis by the configured analysisTier', async () => {
+    const { ctx, options } = fakeCtx(textChunks('{"action":"done","reason":"ok"}'))
+    const provider = routedProvider(ctx, { analysisTier: 'flash' })
+    await provider.analyzeScreenshot(image, 't')
+    expect(options()?.provider).toBe('cp')
+    expect(options()?.model).toBe('cm')
+  })
+
+  it('honors an explicit tier override on analyzeScreenshot', async () => {
+    const { ctx, options } = fakeCtx(textChunks('{"action":"done","reason":"ok"}'))
+    const provider = routedProvider(ctx)
+    await provider.analyzeScreenshot(image, 't', undefined, 'flash')
+    expect(options()?.provider).toBe('cp')
+    expect(options()?.model).toBe('cm')
+  })
+
+  it('routes change detection by the configured changeDetectionTier', async () => {
+    const { ctx, options } = fakeCtx(textChunks('CHANGED'))
+    const provider = routedProvider(ctx, { changeDetectionTier: 'pro' })
+    await provider.detectChange(image, image)
+    expect(options()?.provider).toBe('vp')
+    expect(options()?.model).toBe('vm')
+  })
+
+  it('honors an explicit tier override on detectChange', async () => {
+    const { ctx, options } = fakeCtx(textChunks('CHANGED'))
+    const provider = routedProvider(ctx)
+    await provider.detectChange(image, image, undefined, 'pro')
+    expect(options()?.provider).toBe('vp')
+    expect(options()?.model).toBe('vm')
+  })
+
+  it('routes verification by the configured verificationTier and reports it', async () => {
+    const { ctx, options } = fakeCtx(textChunks('{"verdict":"yes","reason":"ok"}'))
+    const provider = routedProvider(ctx, { verificationTier: 'pro' })
+    const verdict = await provider.verifyActionEffect(image, image, 'click')
+    expect(options()?.provider).toBe('vp')
+    expect(options()?.model).toBe('vm')
+    expect(verdict.tier).toBe('pro')
+  })
+
+  it('honors an explicit tier override on verifyActionEffect', async () => {
+    const { ctx, options } = fakeCtx(textChunks('{"verdict":"yes","reason":"ok"}'))
+    const provider = routedProvider(ctx)
+    const verdict = await provider.verifyActionEffect(image, image, 'click', undefined, 'pro')
+    expect(options()?.provider).toBe('vp')
+    expect(verdict.tier).toBe('pro')
   })
 })

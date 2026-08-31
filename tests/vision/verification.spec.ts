@@ -10,7 +10,7 @@ import {
   settle,
   shouldVerify,
 } from '../../src/vision/verification.ts'
-import type { ActionEffectVerdict, VisionImage, VisionProvider } from '../../src/vision/vision-provider.ts'
+import type { TieredVerdict, VisionImage, VisionProvider } from '../../src/vision/vision-provider.ts'
 import { testConfig } from '../helpers.ts'
 
 const frame: VisionImage = { data: new Uint8Array([1, 2, 3]), width: 1280, height: 720 }
@@ -29,7 +29,7 @@ function shot(width: number, height: number, id = 'obs-after'): ScreenShot {
 
 /** VisionProvider fake recording calls; per-method results are injectable. */
 function fakeVision(overrides: {
-  verdict?: ActionEffectVerdict
+  verdict?: TieredVerdict
   verifyThrows?: Error
   analysis?: { action: 'click' | 'observe'; x?: number; y?: number; reason: string }
   analyzeThrows?: Error
@@ -143,6 +143,19 @@ describe('runActionVerification', () => {
     expect(vision.verifyCalls).toBe(1)
   })
 
+  it('passes the producing tier through when the provider reports one', async () => {
+    const vision = fakeVision({ verdict: { verdict: 'yes', reason: 'the dialog appeared', tier: 'pro' } })
+    const verdict = await runActionVerification({
+      vision,
+      settleMs: 0,
+      before: frame,
+      actionDescription: 'click at (10, 10)',
+      captureAfter: async () => shot(1280, 720),
+      sleep: async () => {},
+    })
+    expect(verdict).toEqual({ verdict: 'yes', reason: 'the dialog appeared', tier: 'pro' })
+  })
+
   it('skips the model when the frame size changed and reports uncertain', async () => {
     const vision = fakeVision()
     const verdict = await runActionVerification({
@@ -155,6 +168,7 @@ describe('runActionVerification', () => {
     })
     expect(verdict.verdict).toBe('uncertain')
     expect(verdict.reason).toContain('frame size changed')
+    expect(verdict.tier).toBeUndefined()
     expect(vision.verifyCalls).toBe(0)
   })
 

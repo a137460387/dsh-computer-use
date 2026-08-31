@@ -207,6 +207,7 @@ export async function maybeVerifyAction(
     toolName,
     verdict: verdict.verdict,
     reason: verdict.reason,
+    ...verdict.tier !== undefined ? { modelTier: verdict.tier } : {},
     retried: false,
   })
   return verdict.verdict === 'yes'

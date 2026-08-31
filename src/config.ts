@@ -17,9 +17,12 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647
  * Model routes are provider+model pairs exactly as `ctx.llm` resolves them:
  * the provider is a registered adapter route (a `settings.yaml`
  * `llm-pi-ai.providers` key in this deployment), the model an id that route
- * advertises. The bundle ships UNCONFIGURED: every route field defaults to
- * the empty string and the plugin refuses activation with configuration
- * guidance until a deployment names its own routes in a later patch layer.
+ * advertises. Vision calls route by purpose: each purpose picks a cost tier
+ * (`flash` = change-detection route, `pro` = vision route), and the shipped
+ * tier defaults preserve the fixed pre-routing assignment. The bundle ships
+ * UNCONFIGURED: every route field defaults to the empty string and the
+ * plugin refuses activation with configuration guidance until a deployment
+ * names its own routes in a later patch layer.
  */
 export interface ComputerUseConfig {
   /** Provider route owning the primary vision model; empty until configured. */
@@ -30,6 +33,22 @@ export interface ComputerUseConfig {
   readonly changeDetectionProvider: string
   /** Cheap model id that decides whether the screen changed; empty until configured. */
   readonly changeDetectionModel: string
+  /**
+   * Cost tier for `analyzeScreenshot` calls (screenshot analysis and
+   * coordinate localization): `flash` rides the change-detection route,
+   * `pro` the vision route.
+   */
+  readonly analysisTier: 'flash' | 'pro'
+  /**
+   * Cost tier for screen-change judgement calls (`detectChange`): `flash`
+   * rides the change-detection route, `pro` the vision route.
+   */
+  readonly changeDetectionTier: 'flash' | 'pro'
+  /**
+   * Cost tier for post-action effect verdicts (`verifyActionEffect`):
+   * `flash` rides the change-detection route, `pro` the vision route.
+   */
+  readonly verificationTier: 'flash' | 'pro'
   /** Output-token cap for one vision analysis call. */
   readonly visionMaxOutputTokens: number
   /** End-to-end deadline in milliseconds for one vision model call. */
@@ -137,6 +156,9 @@ export const Config: z<ComputerUseConfig> = z.object({
   visionModel: z.string().default(''),
   changeDetectionProvider: z.string().default(''),
   changeDetectionModel: z.string().default(''),
+  analysisTier: z.union(['flash', 'pro'] as const).default('pro'),
+  changeDetectionTier: z.union(['flash', 'pro'] as const).default('flash'),
+  verificationTier: z.union(['flash', 'pro'] as const).default('flash'),
   visionMaxOutputTokens: z.number().step(1).min(1).default(2048),
   visionTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(120_000),
   maxSteps: z.number().step(1).min(1).default(30),

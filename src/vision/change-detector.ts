@@ -1,8 +1,8 @@
 /**
  * Post-action change detection with a token-saving fast path: dHash
- * fingerprints decide clear cases for free, and the change-detection model is
- * consulted only for the ambiguous zone between "identical" and "clearly
- * different" (spec §3.2/§3.5).
+ * fingerprints decide clear cases for free, and the change-detection tier's
+ * model (by default the flash route) is consulted only for the ambiguous
+ * zone between "identical" and "clearly different" (spec §3.2/§3.5).
  * @module dsh-computer-use/vision/change-detector
  */
 
