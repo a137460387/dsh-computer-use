@@ -26,10 +26,51 @@ export interface DangerAuditRecord {
   readonly textBytes: number
 }
 
-/** Append-only audit sink plus the danger channel. */
+/** Extra audit facts for one sensitive-window capture refusal. */
+export interface SensitiveWindowAuditRecord {
+  /** Session whose screen_shot was refused, when known. */
+  readonly sessionId?: string
+  /** Foreground window title that matched (screen content never logged). */
+  readonly windowTitle: string
+  /** The configured pattern source that fired. */
+  readonly pattern: string
+}
+
+/** Why desktop control paused or resumed. */
+export type PauseReason = 'hotkey' | 'user-input' | 'manual'
+
+/** Who terminated the sidecar process. */
+export type SidecarExitTrigger = 'shutdown' | 'restart' | 'crash'
+
+/** One lifecycle fact appended to the audit log (`lifecycle/<event>` lines). */
+export type LifecycleEvent =
+  | {
+    readonly event: 'mounted'
+    readonly platform: string
+    readonly visionRoutesConfigured: boolean
+    readonly visionRoute: string
+    readonly changeDetectionRoute: string
+  }
+  | { readonly event: 'routes-missing'; readonly missing: readonly string[] }
+  | { readonly event: 'sidecar-starting'; readonly mode: 'prod' | 'dev'; readonly description: string }
+  | { readonly event: 'sidecar-connected'; readonly version: string }
+  | {
+    readonly event: 'sidecar-exited'
+    readonly exitCode: number | null
+    readonly signal: string | null
+    readonly trigger: SidecarExitTrigger
+  }
+  | { readonly event: 'paused'; readonly reason: PauseReason }
+  | { readonly event: 'resumed'; readonly reason: PauseReason }
+
+/** Append-only audit sink plus the danger, sensitive-window, and lifecycle channels. */
 export interface Auditor {
   /** Log one danger interception as a high-risk event. */
   recordDanger(record: DangerAuditRecord): void
+  /** Log one sensitive-window capture refusal as a high-risk event. */
+  recordSensitiveWindow(record: SensitiveWindowAuditRecord): void
+  /** Log one lifecycle transition (mount, sidecar lifetime, pause/resume). */
+  recordLifecycle(event: LifecycleEvent): void
 }
 
 /** One append behind a serial queue so concurrent events never interleave. */
@@ -99,6 +140,24 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         toolName: record.toolName,
         pattern: record.pattern,
         textBytes: record.textBytes,
+      })
+    },
+    recordSensitiveWindow(record: SensitiveWindowAuditRecord): void {
+      log.append({
+        kind: 'danger/sensitive-window',
+        severity: 'high',
+        timestamp: new Date().toISOString(),
+        ...record.sessionId !== undefined ? { sessionId: record.sessionId } : {},
+        windowTitle: record.windowTitle,
+        pattern: record.pattern,
+      })
+    },
+    recordLifecycle(event: LifecycleEvent): void {
+      const { event: name, ...facts } = event
+      log.append({
+        kind: `lifecycle/${name}`,
+        timestamp: new Date().toISOString(),
+        ...facts,
       })
     },
   }

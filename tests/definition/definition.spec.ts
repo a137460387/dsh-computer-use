@@ -38,6 +38,9 @@ class TestRuntime extends ComputerUseRuntime {
   }
   getObservation(): Promise<ScreenShot | undefined> { return Promise.resolve(undefined) }
   getForegroundWindow(): Promise<string> { return Promise.resolve('') }
+  resumeActions(): Promise<ActionResult> {
+    return Promise.reject(new Error('not implemented'))
+  }
 }
 
 describe('ObservationId', () => {
@@ -68,6 +71,15 @@ describe('Config schema', () => {
     expect(config.maxSteps).toBe(30)
     expect(config.visionProvider).toBe('vp')
     expect(config.dangerPatterns.length).toBeGreaterThan(0)
+  })
+
+  it('defaults the takeover and sensitive-window policy', () => {
+    const config = testConfig()
+    expect(config.takeoverHotkey).toEqual(['ctrl', 'alt', 'u'])
+    expect(config.pauseOnUserInput).toBe(true)
+    expect(config.userInputGraceMs).toBe(250)
+    expect(config.sensitiveWindowPatterns).toEqual(expect.arrayContaining(['keepass', '1password', '网银']))
+    expect(config.sensitiveWindowAllowlist).toEqual([])
   })
 
   it('rejects a missing required path', () => {

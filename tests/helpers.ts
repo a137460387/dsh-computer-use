@@ -1,5 +1,6 @@
 import { Config } from '../src/config.ts'
 import type { ComputerUseConfig } from '../src/config.ts'
+import type { Auditor } from '../src/security/auditor.ts'
 
 /**
  * Build a validated {@link ComputerUseConfig} for tests. Schemastery fills the
@@ -17,4 +18,13 @@ export function testConfig(overrides: Record<string, unknown> = {}): ComputerUse
     screenshotArchivePath: 'shots',
     ...overrides,
   } as unknown as ComputerUseConfig)
+}
+
+/** An audit sink that drops everything, for provider tests exercising other seams. */
+export function noOpAuditor(): Auditor {
+  return {
+    recordDanger: () => {},
+    recordSensitiveWindow: () => {},
+    recordLifecycle: () => {},
+  }
 }

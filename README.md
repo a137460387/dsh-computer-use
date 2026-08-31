@@ -6,10 +6,12 @@ Desktop-level **Computer Use** (vision control) bundle for [DeepSeek Harness](ht
 
 This plugin gives a DSH agent desktop control for targets that browser/DOM tools cannot reach (native applications, the OS shell of a window, anything rendered only as pixels). One host-plane bundle row provides:
 
-- **Six model-facing tools** — `screen_shot`, `get_display_info`, `click_at`, `type_text`, `scroll`, `hotkey`.
+- **Seven model-facing tools** — `screen_shot`, `get_display_info`, `click_at`, `type_text`, `scroll`, `hotkey`, `resume_actions`.
 - **A Python MCP sidecar** (`dsh-cu-server`) spawned through `ctx.subprocess`, speaking standard MCP JSON-RPC 2.0 over stdio. The sidecar owns all coordinate mathematics: the model emits pixels in *screenshot space*, and the sidecar maps them per-display with DPI awareness (Per-Monitor V2 on Windows, backing scale on macOS).
 - **Vision analysis through `ctx.llm`** on deployment-configured routes — screenshots persist through `ctx.attachments` as durable image blocks; the plugin never manages API keys or raw HTTP calls.
 - **A woven security layer** — tiered approval (medium-risk actions may auto-approve within a session window; high-risk always prompts), a danger-pattern filter on typed text, an ObservationId freshness gate, a no-change circuit breaker, per-session step ceilings, a window whitelist, and an append-only audit log with retention sweeps.
+- **User takeover detection** — a takeover hotkey (default `ctrl+alt+u`) and any user mouse/keyboard activity pause the four action tools until resumed; the pause state is audited and survives sidecar restarts.
+- **Sensitive-window capture refusal** — screenshots are refused before any pixel is captured when the foreground window title matches a deployment blocklist (password managers, online banking, ...); nothing is archived, persisted, or sent to a model.
 
 ## Installation
 
@@ -66,6 +68,18 @@ The bundle ships **UNCONFIGURED on purpose**: the four model-route fields defaul
                                     # format, shutdown, sudo, Remove-Item -Recurse…
     # allowedApps: []               # window whitelist; empty allows every window
 
+    # ── User takeover ──
+    # takeoverHotkey: [ctrl, alt, u]  # pauses/resumes the four action tools;
+                                      # empty list disables the hotkey
+    # pauseOnUserInput: true          # user cursor movement / key presses pause
+    # userInputGraceMs: 250           # post-action grace before input detection
+
+    # ── Sensitive windows ──
+    # sensitiveWindowPatterns: [...]  # title regexes refusing capture; schema
+                                      # defaults cover 1password, keepass,
+                                      # bitwarden, lastpass, netbank, 网银…
+    # sensitiveWindowAllowlist: []    # title regexes beating the blocklist
+
     # ── Approval answerer ──
     autoApprovalWindowMs: 300000    # medium-risk auto-grant window
     autoApprovalMaxGrants: 50       # grant ceiling per window
@@ -89,6 +103,8 @@ Key facts:
 - **Vision routes are provider+model pairs**, exactly as `ctx.llm` resolves them. The primary route must advertise image input; the change-detection route can be any cheap text+image model. Keys are resolved by the owning adapter — this plugin never sees them.
 - `dangerPatterns` is a mis-fire backstop, not a security boundary; the sidecar carries an aligned backstop of its own.
 - `allowedApps` turns any action against a non-whitelisted foreground window into a high-risk (interactive-confirmation) action; lookup failures fail closed to high risk as well.
+- **Takeover semantics**: while desktop control is paused, `click_at`/`type_text`/`scroll`/`hotkey` are refused with recovery guidance; `screen_shot`, `get_display_info`, and `resume_actions` stay available. Resume by pressing the takeover hotkey again or calling `resume_actions`. The pause state is pushed to the plugin as an MCP notification, audited (`lifecycle/paused`, `lifecycle/resumed`), and re-engaged automatically if the sidecar restarts.
+- **Sensitive-window semantics**: the sidecar checks the foreground window title BEFORE capturing; a hit refuses the screenshot without archiving, persisting, or model-sending any pixels, and writes a `danger/sensitive-window` audit line (title logged, screen content never).
 
 ## Known Limitations
 
@@ -98,27 +114,35 @@ Key facts:
 - **Danger-pattern interception is regex-based** and can be spelled around; it exists to stop mis-fires, not adversaries.
 - The sidecar is a **single-instance executor**: concurrent tool calls serialize behind one queue.
 - The production binary is large (~90 MiB single-file PyInstaller bundle) and platform-specific; build it on the platform that runs it.
+- **No session isolation — one physical cursor.** Windows exposes a single interactive session: two parallel Computer Use runs (or the user working beside the agent) share one cursor and one foreground window and WILL collide. Synthetic-cursor / per-session isolation is a research item and not implemented; run one desktop-control session at a time.
+- **Sensitive-window detection matches window TITLES, not pixels.** OCR-level detection of sensitive fields (a password box rendered inside an ordinary window) is not implemented; an untitled or generically titled sensitive window is not caught. The takeover hotkey is polling-based (`GetAsyncKeyState`), not a registered system hotkey, and is only active while the sidecar runs.
+- **Pause monitoring and the sensitive-window gate are Windows-only** (pure ctypes; no new dependencies). On macOS the monitor does not run (the takeover hotkey and user-input pause are unavailable; `resume_actions` still works) and the capture gate cannot read window titles, so capture is fail-open there.
+- **Pausing interacts with approval waits.** A high-risk action's interactive approval is NOT an in-flight window: moving the mouse to click "allow" pauses desktop control, and the approved action is then refused until resumed (hotkey again or `resume_actions`).
+- Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; the medium-risk auto-approval answerer can be shadowed by a remote approval bridge in `dsh web` (waterfall registration order); `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and approval-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, and lifecycle transitions are audited).
 
 ## Model Experience
 
 ### What the model sees
 
-Six host-plane tools, visible to every session of the profile the bundle is installed into:
+Seven host-plane tools, visible to every session of the profile the bundle is installed into:
 
 | Tool | Risk | What it returns |
 |---|---|---|
-| `screen_shot` | low (no approval) | The screenshot as an image block plus `observationId`, dimensions, and whether the screen changed since the previous capture |
+| `screen_shot` | low (no approval) | The screenshot as an image block plus `observationId`, dimensions, and whether the screen changed since the previous capture; refused outright when the foreground window matches a sensitive pattern |
 | `get_display_info` | low (no approval) | Per-display bounds, DPI scale factor, primary flag |
 | `click_at` | medium | Success + duration; coordinates stay in screenshot space, the sidecar maps them |
 | `type_text` | medium | Success + char count; danger payloads are blocked before approval |
 | `scroll` | medium | Success + duration |
-| `hotkey` | medium; system shortcuts escalate to high | Success + duration |
+| `hotkey` | medium; system shortcuts and the takeover combo escalate to high | Success + duration |
+| `resume_actions` | low (no approval) | Whether desktop control was paused and is now resumed |
 
 The expected loop: `screen_shot` → decide from the returned image → one action tool carrying `basedOnObservationId` (the ObservationId of the screenshot being acted on, valid 30 s) → `screen_shot` again to observe the outcome. Tool descriptions instruct the model to never convert coordinates itself and to prefer browser/DOM tools when the target is a web page.
 
 ### Guards the model runs into
 
 - **Stale or unknown `basedOnObservationId`** references are refused with guidance to capture a fresh screenshot.
+- **User takeover pauses actions.** The takeover hotkey (default `ctrl+alt+u`) or any user mouse/keyboard activity outside an in-flight action pauses the four action tools; they refuse with recovery guidance until the hotkey is pressed again or `resume_actions` is called. Observations stay available while paused.
+- **Sensitive windows refuse capture** before any pixel is grabbed (title blocklist, allowlist beats it); the refusal names the matched pattern and the allowlist escape hatch.
 - **System hotkeys** (`win+r`, `win+i`, `win+x`, `win+l`, `alt+f4`, `ctrl+shift+esc`) always prompt the user interactively, even inside an auto-approval window.
 - **The no-change breaker** pauses the run after consecutive actions whose surrounding frames are perceptually identical (dHash distance within the similarity ceiling), asking for user intervention.
 - **The step ceiling** stops a session after `maxSteps` actions.
@@ -133,6 +157,7 @@ Each `screen_shot` result contributes one image attachment (downscaled below `sc
 pnpm install            # links @deepseek-ai/* peers to ../deepseek-harness via pnpm.overrides
 npx tsc --noEmit        # strict type check (source-launch: dsh loads .ts directly)
 pnpm test               # vitest unit tests (security/vision/definition logic)
+python -m unittest discover -s tests/python -v   # sidecar state-machine unit tests
 pnpm run build:python   # PyInstaller single-file sidecar into bin/
 python tests/dev-mcp-smoke.py   # stdio protocol smoke against the Python source
 ```

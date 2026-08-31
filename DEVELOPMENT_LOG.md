@@ -349,3 +349,97 @@ macOS 主屏限制、Linux 拒绝加载、正则拦截非安全边界、单实�
 步骤 A–D（安装、`--dump-config` 层叠确认、重启加载、Web UI 发起
 Computer Use 任务观察 sidecar 拉起/真实鼠标动作/审计日志）已输出给用户，
 等待反馈。
+
+## Phase 4 交付结论（P0 安全加固、日志可见性、文档）
+
+### P4-1：接管热键 + 用户输入即暂停（任务 1）
+
+**状态机归属：sidecar 是唯一事实源。** 暂停判定依赖桌面物理输入
+（`GetAsyncKeyState` 轮询），只能在 Python 侧实现；Node 侧只保存镜像。
+`core/pause.py` 的 `PauseState` 是与平台无关的纯状态机（可单测），
+监控线程 `start_monitor` 是 Windows-only 纯 ctypes（无新依赖）。
+
+关键决策：
+
+1. **暂停态推送走自定义 MCP 通知** `notifications/dsh-cu/pause-state`。
+   Node 侧在自己实现的 `SidecarTransport` 解析循环里按方法前缀拦截，
+   不进 MCP SDK——避免为 SDK 的 zod 通知 schema 注册引入依赖；线缆仍是
+   标准 JSON-RPC notification。stdout 写出在 sidecar 内加锁（通知来自
+   监控线程，响应来自 stdin 循环）。
+2. **"在途"窗口 = 动作工具分发开始→结束**，用 `begin_action`/`end_action`
+   计数包住物理执行；`userInputGraceMs`（默认 250ms）是动作结束后的检测
+   宽限，吸收 sidecar 自身合成输入的迟到事件。未匹配的 `end_action` 是
+   no-op（不会把计数打成负数，也不会凭空启动宽限）。
+3. **首次轮询冲刷** `GetAsyncKeyState` 低位的"自上次调用以来按下"锁存，
+   否则进程启动前的按键会被误判为用户输入。
+4. **崩溃不得静默解除暂停**：Node 镜像在重连后调用新增的 `pause_actions`
+   内部工具重新挂起；失败即拆掉新 sidecar（fail closed）。`resume_actions`
+   是模型可见工具，`pause_actions` 仅 Node 内部使用。
+5. **接管组合本身升级为高危**（`isSameHotkey` 复用 `normalizeHotkey`）：
+   模型不得在无交互确认的情况下切换暂停态。
+6. 监控线程在按住接管组合期间跳过用户输入检测——否则"按热键恢复"的
+   同一轮询里组合键本身会被当作用户输入立即重新暂停。
+
+**新记录的设计张力（只记录不修）**：高危动作的审批等待不属于在途窗口，
+用户移动鼠标去点"允许"即触发暂停，批准后的动作会以暂停错误被拒——
+恢复路径是再按热键或 `resume_actions`。已写入 README Known Limitations。
+
+### P4-2：敏感场景不截屏（任务 2）
+
+**标题检查先于一切像素操作**：`screen_shot` 分发第一步取前台窗口标题
+（`GetForegroundWindow` + `GetWindowTextW`），命中即抛
+`SensitiveWindowError`，不落盘、不 persist、不发模型。错误消息 = 标记
+`[dsh-cu-sensitive-window]` + JSON 事实载荷（`windowTitle`/`pattern`），
+Node 侧 `parseSensitiveWindowFacts` 解析成类型化错误
+`SensitiveWindowRefusal`，`screen_shot` 工具据此写
+`danger/sensitive-window` 审计行（可记录标题，绝不记录屏内容）。
+
+- 允许名单 `sensitiveWindowAllowlist` 优先于封禁名单（显式豁免语义）。
+- Node 侧 `SensitiveWindowPolicy` 是参考语义 + 挂载期校验器：非法正则在
+  `apply` 即抛（自包含配置在加载时 fail loud），运行期强制执行在 sidecar。
+- **macOS 无纯 ctypes 的窗口标题 API**：`foreground_window_title()` 返回
+  None，检查整体跳过（fail-open）——已写入 Known Limitations；不为此引入
+  pyobjc（违反"不引入新依赖"约束）。
+- OCR 级密码框检测为未来工作，写入 Known Limitations。
+
+### P4-3：lifecycle 审计事件（任务 3）
+
+`Auditor` 接口新增 `recordLifecycle`/`recordSensitiveWindow`，
+`lifecycle/*` 行与既有 `action/*`、`danger/*` 同文件同格式。七种事件：
+`mounted`（platform + 路由）、`routes-missing`（激活拒绝时，先审计后抛）、
+`sidecar-starting`（mode + 描述）、`sidecar-connected`（版本）、
+`sidecar-exited`（exitCode/signal/触发方）、`paused`/`resumed`（触发方）。
+
+实现要点：
+
+- **退出归因**：`exitTrigger` 字段（`shutdown`/`restart`/`crash`，默认
+  crash 读数），dispose 与健康重启在 terminate 前置位；`apply` 内
+  `createAuditor` 提前到路由检查之前，使 `routes-missing` 可审计。
+- **dispose 重排**：原实现在 `waitForExit` 前清掉 `this.handle`，done
+  处理器的归属检查（`this.handle === handle`）永远失配；现在保留到退出
+  被记录后才清。
+- `ctx.logger` 调用全部保留（双写）；未引入 console exporter。
+
+### P4-4：工程契约补充
+
+- **`ctx.plugin` 只转发单个 config 实参**（cordis `GetPluginConfig` 取
+  构造器第一参数），带第三参的调用类型检查不过。Provider 改为在 `apply`
+  内直接构造（`new McpComputerUseProvider(ctx, config, auditor)`）——
+  Service 构造器自注册并随属主 fiber 卸载，与 Phase 2 记录的
+  `ApprovalService(ctx, config)` 先例同形。
+- sidecar 版本升至 0.1.1（新增 `resume_actions`/`pause_actions` 工具面 +
+  暂停通知）；兼容前缀仍是 `0.1.*`。
+
+### P4-5：验证结果（2026-08-31）
+
+- `npx tsc --noEmit` 零错误；`vitest run --coverage` 114/114 全绿：
+  definition 100% / security 97.1% lines / vision 89.0% lines，
+  总体 lines 93.61%（均 >80%）。
+- `python -m unittest discover -s tests/python` 19/19（暂停状态机
+  pause/resume/in-flight/宽限、热键 VK 解析、敏感窗口匹配与标记载荷）。
+- `tests/dev-mcp-smoke.py`（源码模式，交互会话）：暂停回路（拒绝带
+  `[dsh-cu-paused]` 标记）、暂停期间截图可用、恢复、通知推送
+  `[paused=True, paused=False]`、中心点击映射全部通过。
+- PyInstaller 产物重建：89.5 MiB，SHA256
+  `effd0cd77d71fd283ab2b7be5d247347fbbaf97cd92db13ad62d641ad61619f2`；
+  对产物复跑协议冒烟（版本 0.1.1、九工具面、暂停回路、通知）通过。

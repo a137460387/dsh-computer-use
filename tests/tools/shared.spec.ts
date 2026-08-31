@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isHighRiskHotkey, normalizeHotkey } from '../../src/tools/shared.ts'
+import { isHighRiskHotkey, isSameHotkey, normalizeHotkey } from '../../src/tools/shared.ts'
 
 describe('normalizeHotkey', () => {
   it('lowercases and sorts keys into a canonical identity', () => {
@@ -37,5 +37,22 @@ describe('isHighRiskHotkey', () => {
   it('does not escalate a superset of a system shortcut', () => {
     // win+r is high risk, but win+r+extra is a different combination.
     expect(isHighRiskHotkey(['win', 'r', 'shift'])).toBe(false)
+  })
+})
+
+describe('isSameHotkey', () => {
+  it('compares independent of key order and case', () => {
+    expect(isSameHotkey(['u', 'ALT', 'Ctrl'], ['ctrl', 'alt', 'u'])).toBe(true)
+  })
+
+  it('rejects different combos and subset/superset pairs', () => {
+    expect(isSameHotkey(['ctrl', 'alt'], ['ctrl', 'alt', 'u'])).toBe(false)
+    expect(isSameHotkey(['ctrl', 'alt', 'u'], ['ctrl', 'alt'])).toBe(false)
+    expect(isSameHotkey(['ctrl', 'alt', 'u'], ['ctrl', 'alt', 'i'])).toBe(false)
+  })
+
+  it('never matches an empty combination', () => {
+    expect(isSameHotkey([], [])).toBe(false)
+    expect(isSameHotkey([], ['ctrl'])).toBe(false)
   })
 })

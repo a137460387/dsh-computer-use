@@ -150,6 +150,23 @@ def hotkey(keys: list[str]) -> None:
     pyautogui.hotkey(*keys)
 
 
+def foreground_window_title() -> str | None:
+    """Title of the foreground window, or None when the platform cannot
+    read it with pure ctypes (macOS needs pyobjc; refused backends too).
+    An empty string is a real title-less window, distinct from None."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return ""
+    buffer = ctypes.create_unicode_buffer(1024)
+    user32.GetWindowTextW(hwnd, buffer, len(buffer))
+    return str(buffer.value)
+
+
 def foreground_process_name() -> str:
     """Basename of the process owning the foreground window."""
     if sys.platform == "win32":

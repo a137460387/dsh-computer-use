@@ -88,6 +88,16 @@ export function normalizeHotkey(keys: readonly string[]): string {
 }
 
 /**
+ * Whether two key combinations are the same hotkey (order/case independent).
+ * @param keys - one combination.
+ * @param other - the combination to compare against.
+ * @returns true when both describe the identical key set.
+ */
+export function isSameHotkey(keys: readonly string[], other: readonly string[]): boolean {
+  return keys.length > 0 && keys.length === other.length && normalizeHotkey(keys) === normalizeHotkey(other)
+}
+
+/**
  * System-shortcut combinations that always escalate to high risk: they drive
  * the operating system itself (run dialogs, settings, task manager, session
  * lock, window close), outside any application the task targets. This set is

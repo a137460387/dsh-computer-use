@@ -298,6 +298,13 @@ export abstract class ComputerUseRuntime extends Service {
    * @returns the foreground process name (basename, no path).
    */
   abstract getForegroundWindow(): Promise<string>
+
+  /**
+   * Resume desktop control actions after a pause (takeover hotkey or
+   * user-input pause). Works while paused; observation tools do too.
+   * @returns the action outcome; `message` says whether anything changed.
+   */
+  abstract resumeActions(): Promise<ActionResult>
 }
 
 export default ComputerUseRuntime

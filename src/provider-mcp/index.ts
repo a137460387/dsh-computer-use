@@ -8,6 +8,13 @@
  * serializes through one queue (the sidecar is a single-instance executor),
  * observations expire after the configured TTL, a health ping watches the
  * connection, and teardown reaches full process-tree quiescence.
+ *
+ * Pause ownership: the sidecar's background monitor (takeover hotkey,
+ * user-input detection) is the source of truth; every pause/resume transition
+ * is pushed here as a `notifications/dsh-cu/pause-state` notification the
+ * transport intercepts before the MCP SDK. This mirror drives the lifecycle
+ * audit and re-engages the pause after any sidecar restart, so a crash never
+ * silently unpauses desktop control.
  * @module dsh-computer-use/provider-mcp
  */
 
@@ -36,6 +43,16 @@ import type {
   ScrollRequest,
   TypeTextRequest,
 } from '../definition/index.ts'
+import type { Auditor, PauseReason, SidecarExitTrigger } from '../security/auditor.ts'
+import {
+  PAUSED_MARKER,
+  PausedRefusal,
+  SENSITIVE_WINDOW_MARKER,
+  SensitiveWindowRefusal,
+  hotkeyLabel,
+  parseSensitiveWindowFacts,
+} from '../security/refusals.ts'
+import { normalizeHotkey } from '../tools/shared.ts'
 
 /** Sidecar protocol version prefix this plugin is compatible with. */
 const COMPATIBLE_SERVER_PREFIX = '0.1.'
@@ -45,6 +62,9 @@ const STDERR_DIAGNOSTIC_BYTES = 65_536
 
 /** This package's root (the provider lives two directories below it). */
 const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+
+/** Method name of the sidecar's pause-state push notification. */
+const PAUSE_STATE_NOTIFICATION = 'notifications/dsh-cu/pause-state'
 
 /** One cached observation with its freshness timer. */
 interface StoredObservation {
@@ -61,6 +81,8 @@ interface StoredObservation {
 export interface SidecarLaunch {
   /** argv for `ctx.subprocess.spawn`. */
   readonly argv: readonly string[]
+  /** Resolved launch mode. */
+  readonly mode: 'prod' | 'dev'
   /** Human-readable launch description for diagnostics. */
   readonly description: string
 }
@@ -88,7 +110,7 @@ export function computerUseBinaryPath(): string {
  * `serverMode` wins; otherwise the production binary is used when present and
  * the Python source otherwise (development fallback).
  * @param config - validated deployment policy.
- * @returns argv and a diagnostic description.
+ * @returns argv, mode, and a diagnostic description.
  * @throws when a forced mode is unavailable, with acquisition guidance.
  */
 export function resolveSidecarLaunch(config: ComputerUseConfig): SidecarLaunch {
@@ -103,25 +125,41 @@ export function resolveSidecarLaunch(config: ComputerUseConfig): SidecarLaunch {
         + 'dsh-cu-server release asset into bin/ — or set DSH_CU_MODE=dev to run the Python source',
       )
     }
-    return { argv: [binary], description: `prod binary ${binary}` }
+    return { argv: [binary], mode, description: `prod binary ${binary}` }
   }
   const script = join(PACKAGE_ROOT, 'src-python', 'main.py')
   if (!existsSync(script)) {
     throw new Error(`dsh-computer-use: the dev sidecar script is missing at ${script}`)
   }
-  return { argv: [config.pythonCommand, script], description: `dev script ${config.pythonCommand} ${script}` }
+  return { argv: [config.pythonCommand, script], mode, description: `dev script ${config.pythonCommand} ${script}` }
+}
+
+/** A plugin-namespaced sidecar notification intercepted before the MCP SDK. */
+interface SidecarNotificationMessage {
+  readonly method: string
+  readonly params?: unknown
+}
+
+/** Whether one parsed line is a plugin-namespaced sidecar notification. */
+function isSidecarNotification(message: unknown): message is SidecarNotificationMessage {
+  return typeof message === 'object' && message !== null
+    && typeof (message as { method?: unknown }).method === 'string'
+    && (message as { method: string }).method.startsWith('notifications/dsh-cu/')
 }
 
 /**
  * MCP Transport bridged onto a `ctx.subprocess` handle: newline-delimited
  * JSON-RPC written to the child's stdin, parsed from its stdout. The
  * subprocess seam owns the process lifetime; this transport owns only the
- * protocol framing over its streams.
+ * protocol framing over its streams. Lines carrying `notifications/dsh-cu/*`
+ * go to {@link onSidecarNotification} instead of the MCP SDK.
  */
 class SidecarTransport implements Transport {
   onclose?: () => void
   onerror?: (error: Error) => void
   onmessage?: (message: JSONRPCMessage) => void
+  /** One intercepted plugin-namespaced notification. */
+  onSidecarNotification?: (message: SidecarNotificationMessage) => void
 
   private buffer = ''
   private closed = false
@@ -140,10 +178,17 @@ class SidecarTransport implements Transport {
         this.buffer = this.buffer.slice(separator + 1)
         separator = this.buffer.indexOf('\n')
         if (line === '') continue
+        let parsed: unknown
         try {
-          this.onmessage?.(JSON.parse(line) as JSONRPCMessage)
+          parsed = JSON.parse(line)
         } catch (error) {
           this.onerror?.(new Error(`dsh-computer-use: sidecar sent an unparseable line: ${String(error)}`))
+          continue
+        }
+        if (isSidecarNotification(parsed)) {
+          this.onSidecarNotification?.(parsed)
+        } else {
+          this.onmessage?.(parsed as JSONRPCMessage)
         }
       }
     })
@@ -200,10 +245,12 @@ interface McpToolResultShape {
 
 /**
  * The MCP-backed computer-use service. Mounted by the bundle entry with the
- * validated {@link ComputerUseConfig}; the sidecar starts lazily at first use.
+ * validated {@link ComputerUseConfig} and the bundle auditor; the sidecar
+ * starts lazily at first use.
  */
 export default class McpComputerUseProvider extends ComputerUseRuntime {
   private readonly config: ComputerUseConfig
+  private readonly auditor: Auditor
   private handle: SubprocessHandle | undefined
   private client: Client | undefined
   private transport: SidecarTransport | undefined
@@ -212,10 +259,15 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
   private readonly observations = new Map<string, StoredObservation>()
   private healthTimer: NodeJS.Timeout | undefined
   private disposed = false
+  /** Pause mirror of the sidecar's state, driven by push notifications. */
+  private paused = false
+  /** Attribution for the next sidecar exit; defaults to the crash reading. */
+  private exitTrigger: SidecarExitTrigger = 'crash'
 
-  constructor(ctx: Context, config: ComputerUseConfig) {
+  constructor(ctx: Context, config: ComputerUseConfig, auditor: Auditor) {
     super(ctx)
     this.config = config
+    this.auditor = auditor
     ctx.effect(() => {
       return async () => {
         this.disposed = true
@@ -225,12 +277,13 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         const client = this.client
         const handle = this.handle
         this.client = undefined
-        this.handle = undefined
         if (client !== undefined) await client.close().catch(() => {})
         if (handle !== undefined) {
+          this.exitTrigger = 'shutdown'
           handle.terminate()
           await handle.waitForExit()
         }
+        this.handle = undefined
       }
     })
   }
@@ -249,6 +302,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
   private async startSidecar(): Promise<void> {
     const launch = resolveSidecarLaunch(this.config)
+    this.auditor.recordLifecycle({ event: 'sidecar-starting', mode: launch.mode, description: launch.description })
     this.ctx.logger.info(`dsh-computer-use: starting sidecar (${launch.description})`)
     const handle = this.ctx.subprocess.spawn({
       argv: launch.argv,
@@ -262,9 +316,15 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       env: {
         ...scrubbedParentEnv(),
         // Deliberate DSH_* opt-ins over the scrubbed base (subprocess contract):
-        // the sidecar's archive directory and freshness window are deployment facts.
+        // the sidecar's archive directory, freshness window, and takeover policy
+        // are deployment facts.
         DSH_CU_SCREENSHOT_DIR: this.config.screenshotArchivePath,
         DSH_CU_OBSERVATION_TTL_MS: String(this.config.observationTtlMs),
+        DSH_CU_TAKEOVER_HOTKEY: normalizeHotkey(this.config.takeoverHotkey),
+        DSH_CU_PAUSE_ON_USER_INPUT: this.config.pauseOnUserInput ? '1' : '0',
+        DSH_CU_USER_INPUT_GRACE_MS: String(this.config.userInputGraceMs),
+        DSH_CU_SENSITIVE_WINDOW_PATTERNS: JSON.stringify(this.config.sensitiveWindowPatterns),
+        DSH_CU_SENSITIVE_WINDOW_ALLOWLIST: JSON.stringify(this.config.sensitiveWindowAllowlist),
         PYTHONIOENCODING: 'utf-8',
       },
     })
@@ -273,8 +333,17 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     // dead and surface the exit facts on the next call; teardown owns the rest.
     void handle.done.then((outcome) => {
       if (this.handle === handle) {
+        const trigger = this.exitTrigger
+        this.exitTrigger = 'crash'
+        this.auditor.recordLifecycle({
+          event: 'sidecar-exited',
+          exitCode: outcome.exitCode,
+          signal: outcome.signal,
+          trigger,
+        })
         this.ctx.logger.warn(
-          `dsh-computer-use: sidecar exited (exitCode ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
+          `dsh-computer-use: sidecar exited (exitCode ${String(outcome.exitCode)}, `
+          + `signal ${String(outcome.signal)}, trigger ${trigger})`,
         )
         this.client = undefined
         this.transport = undefined
@@ -284,6 +353,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     }, () => {})
 
     const transport = new SidecarTransport(handle)
+    transport.onSidecarNotification = message => this.handleSidecarNotification(message)
     const client = new Client(
       { name: 'dsh-computer-use', version: '0.1.0' },
       { capabilities: {} },
@@ -298,6 +368,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     try {
       await client.connect(transport)
     } catch (error) {
+      this.exitTrigger = 'shutdown'
       handle.terminate()
       await handle.waitForExit()
       this.handle = undefined
@@ -310,6 +381,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
     const server = client.getServerVersion()
     if (server === undefined || !server.version.startsWith(COMPATIBLE_SERVER_PREFIX)) {
+      this.exitTrigger = 'shutdown'
       await client.close()
       handle.terminate()
       await handle.waitForExit()
@@ -319,12 +391,14 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         + `(expected ${COMPATIBLE_SERVER_PREFIX}*)`,
       )
     }
+    this.auditor.recordLifecycle({ event: 'sidecar-connected', version: server.version })
 
     // Prove the expected tool surface before serving any call.
     const tools = await client.listTools()
     const names = new Set(tools.tools.map(tool => tool.name))
-    for (const required of ['get_display_info', 'screen_shot', 'click_at', 'type_text', 'scroll', 'hotkey', 'get_foreground_window']) {
+    for (const required of ['get_display_info', 'screen_shot', 'click_at', 'type_text', 'scroll', 'hotkey', 'get_foreground_window', 'resume_actions', 'pause_actions']) {
       if (!names.has(required)) {
+        this.exitTrigger = 'shutdown'
         await client.close()
         handle.terminate()
         await handle.waitForExit()
@@ -333,10 +407,41 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       }
     }
 
+    // A reconnecting sidecar starts unpaused; re-engage the user's pause so a
+    // crash or health restart never silently unpauses desktop control.
+    if (this.paused) {
+      const rehold = await client.callTool({ name: 'pause_actions', arguments: {} }, undefined, {
+        timeout: this.config.rpcTimeoutMs,
+      }) as McpToolResultShape
+      if (rehold.isError === true) {
+        this.exitTrigger = 'shutdown'
+        await client.close()
+        handle.terminate()
+        await handle.waitForExit()
+        this.handle = undefined
+        throw new Error('dsh-computer-use: could not re-engage the pause state after a sidecar restart')
+      }
+    }
+
     this.client = client
     this.transport = transport
     this.startHealthCheck()
     this.ctx.logger.info(`dsh-computer-use: sidecar connected (${server.name} v${server.version})`)
+  }
+
+  /** One intercepted sidecar notification; pause transitions drive the mirror. */
+  private handleSidecarNotification(message: SidecarNotificationMessage): void {
+    if (message.method !== PAUSE_STATE_NOTIFICATION) return
+    const params = message.params
+    if (typeof params !== 'object' || params === null) return
+    const { paused, reason } = params as { paused?: unknown; reason?: unknown }
+    if (typeof paused !== 'boolean' || paused === this.paused) return
+    this.paused = paused
+    const safeReason: PauseReason = reason === 'hotkey' || reason === 'user-input' || reason === 'manual'
+      ? reason
+      : 'manual'
+    this.auditor.recordLifecycle({ event: paused ? 'paused' : 'resumed', reason: safeReason })
+    this.ctx.logger.info(`dsh-computer-use: desktop control ${paused ? 'paused' : 'resumed'} (${safeReason})`)
   }
 
   private startHealthCheck(): void {
@@ -366,13 +471,14 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     const handle = this.handle
     this.client = undefined
     this.transport = undefined
-    this.handle = undefined
     this.stopHealthCheck()
     if (client !== undefined) await client.close().catch(() => {})
     if (handle !== undefined) {
+      this.exitTrigger = 'restart'
       handle.terminate()
       await handle.waitForExit()
     }
+    this.handle = undefined
   }
 
   // ── serialized sidecar calls ───────────────────────────────────────────────
@@ -395,7 +501,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       const text = (result.content ?? [])
         .map((block: unknown): string => (typeof block === 'object' && block !== null && 'text' in block ? String(block.text) : ''))
         .join('\n')
-      throw new Error(`dsh-computer-use: sidecar refused ${name}: ${text || 'no diagnostics'}`)
+      throw this.refusalError(name, text)
     }
     if (result.structuredContent !== undefined) return result.structuredContent as T
     const first = result.content?.[0]
@@ -403,6 +509,30 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       return JSON.parse(String((first as { text: unknown }).text)) as T
     }
     throw new Error(`dsh-computer-use: sidecar returned no usable content for ${name}`)
+  }
+
+  /** Typed error for one sidecar refusal, annotated with recovery guidance. */
+  private refusalError(name: string, text: string): Error {
+    if (text.startsWith(PAUSED_MARKER)) {
+      return new PausedRefusal(
+        `dsh-computer-use: ${name} refused — desktop control is paused (the user took over); `
+        + `press the takeover hotkey (${hotkeyLabel(this.config.takeoverHotkey)}) again or call `
+        + 'resume_actions to resume',
+      )
+    }
+    if (text.startsWith(SENSITIVE_WINDOW_MARKER)) {
+      const facts = parseSensitiveWindowFacts(text)
+      if (facts !== undefined) {
+        return new SensitiveWindowRefusal(
+          facts,
+          `dsh-computer-use: ${name} refused — the foreground window "${facts.windowTitle}" matches `
+          + `sensitive pattern "${facts.pattern}"; no image was captured, persisted, or sent to any model. `
+          + 'Switch to another window or add this title to sensitiveWindowAllowlist',
+        )
+      }
+      return new Error(`dsh-computer-use: ${name} refused on a sensitive window: ${text}`)
+    }
+    return new Error(`dsh-computer-use: sidecar refused ${name}: ${text || 'no diagnostics'}`)
   }
 
   // ── observations ───────────────────────────────────────────────────────────
@@ -562,6 +692,19 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     return this.enqueue(async () => {
       const result = await this.callSidecar<{ name: string }>('get_foreground_window', {})
       return result.name
+    })
+  }
+
+  resumeActions(): Promise<ActionResult> {
+    return this.enqueue(async () => {
+      const result = await this.callSidecar<{ success: boolean; resumed: boolean; durationMs: number }>('resume_actions', {})
+      return {
+        success: true,
+        message: result.resumed === true
+          ? 'desktop control resumed; action tools are available again'
+          : 'desktop control was not paused',
+        durationMs: result.durationMs,
+      }
     })
   }
 

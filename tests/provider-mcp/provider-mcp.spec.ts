@@ -7,7 +7,7 @@ import McpComputerUseProvider, {
   computerUseBinaryPath,
   resolveSidecarLaunch,
 } from '../../src/provider-mcp/index.ts'
-import { testConfig } from '../helpers.ts'
+import { noOpAuditor, testConfig } from '../helpers.ts'
 
 // existsSync is mocked module-wide so the missing-binary refusal is testable
 // on a checkout where the packaged binary exists; the default implementation
@@ -80,7 +80,7 @@ describe('McpComputerUseProvider observation freshness', () => {
   it('returns a fresh observation and expires it after the TTL', async () => {
     vi.useFakeTimers()
     const ctx = new Context()
-    const provider = new McpComputerUseProvider(ctx, testConfig({ observationTtlMs: 1000 }))
+    const provider = new McpComputerUseProvider(ctx, testConfig({ observationTtlMs: 1000 }), noOpAuditor())
 
     const expired: string[] = []
     ctx.on('computer-use/observation-expired', event => expired.push(String(event.observationId)))
@@ -100,7 +100,7 @@ describe('McpComputerUseProvider observation freshness', () => {
 
   it('returns undefined for an observation that was never captured', async () => {
     const ctx = new Context()
-    const provider = new McpComputerUseProvider(ctx, testConfig())
+    const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
     await expect(provider.getObservation(ObservationId('never'))).resolves.toBeUndefined()
   })
 })

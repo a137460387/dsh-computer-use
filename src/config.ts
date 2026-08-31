@@ -55,6 +55,26 @@ export interface ComputerUseConfig {
   readonly dangerPatterns: string[]
   /** Optional window whitelist; empty allows every window. */
   readonly allowedApps: string[]
+  /**
+   * Takeover hotkey (pyautogui-style key names): pressing it toggles the
+   * sidecar's paused state, refusing the four action tools until resumed.
+   * An empty array disables the hotkey (resume via `resume_actions` only).
+   */
+  readonly takeoverHotkey: string[]
+  /** Whether user cursor movement or key presses pause desktop control. */
+  readonly pauseOnUserInput: boolean
+  /**
+   * Grace in milliseconds after each action ends during which user-input
+   * detection stays off, so late-arriving synthetic input never counts.
+   */
+  readonly userInputGraceMs: number
+  /**
+   * Foreground-window title regexes that refuse screenshot capture outright
+   * (password managers, online banking, ...); matched case-insensitively.
+   */
+  readonly sensitiveWindowPatterns: string[]
+  /** Title regexes beating {@link sensitiveWindowPatterns} (explicit carve-outs). */
+  readonly sensitiveWindowAllowlist: string[]
   /** Python executable used by the dev-mode sidecar launch. */
   readonly pythonCommand: string
   /** Forced sidecar launch mode; unset auto-detects the built binary. */
@@ -119,6 +139,21 @@ export const Config: z<ComputerUseConfig> = z.object({
     '\\bdd\\b.*\\bof=/dev/',
   ]),
   allowedApps: z.array(String).default([]),
+  takeoverHotkey: z.array(String).default(['ctrl', 'alt', 'u']),
+  pauseOnUserInput: z.boolean().default(true),
+  userInputGraceMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(250),
+  sensitiveWindowPatterns: z.array(String).default([
+    '1password',
+    'keepass',
+    'bitwarden',
+    'lastpass',
+    'netbank',
+    'online banking',
+    '网银',
+    '密码管理器',
+    'password manager',
+  ]),
+  sensitiveWindowAllowlist: z.array(String).default([]),
   autoApprovalWindowMs: z.number().step(1).min(1000).max(MAX_TIMER_DELAY_MS).default(300_000),
   autoApprovalMaxGrants: z.number().step(1).min(1).default(50),
   pythonCommand: z.string().default('python'),

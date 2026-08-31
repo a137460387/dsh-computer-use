@@ -32,6 +32,17 @@
 #       observationTtlMs: 30000
 #       consecutiveFailureCount: 3
 #       similarityThreshold: 5
+#       takeoverHotkey: [ctrl, alt, u]     # pauses/resumes actions; empty disables
+#       pauseOnUserInput: true
+#       userInputGraceMs: 250
+#       sensitiveWindowPatterns:           # title regexes refusing capture
+#         - 1password
+#         - keepass
+#         - bitwarden
+#         - netbank
+#         - 网银
+#         - 密码管理器
+#       sensitiveWindowAllowlist: []       # title regexes beating the blocklist
 #       pythonCommand: python
 #       serverMode: !!js process.env.DSH_CU_MODE
 #       processGraceMs: 5000

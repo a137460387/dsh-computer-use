@@ -11,6 +11,7 @@ import { ObservationId } from '../definition/index.ts'
 import {
   computerUse,
   isHighRiskHotkey,
+  isSameHotkey,
   normalizeHotkey,
   requestApproval,
   sessionIdOf,
@@ -56,7 +57,11 @@ export function registerHotkey(ctx: Context, deps: ToolDeps): void {
       const sessionId = sessionIdOf(exec)
       stepCounter.assert(sessionId, deps.config.maxSteps)
       deps.breaker.assertCanAct()
-      const baseTier = isHighRiskHotkey(args.keys) ? 'high' : 'medium'
+      // The takeover combo itself escalates: the model must not toggle the
+      // pause state without explicit interactive confirmation.
+      const baseTier = isHighRiskHotkey(args.keys) || isSameHotkey(args.keys, deps.config.takeoverHotkey)
+        ? 'high'
+        : 'medium'
       const tier = await whitelistTier(ctx, deps, baseTier)
       await requestApproval(ctx, exec, 'hotkey', tier, `press ${normalizeHotkey(args.keys)}`)
       stepCounter.note(sessionId)

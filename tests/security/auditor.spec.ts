@@ -74,6 +74,53 @@ describe('createAuditor', () => {
     })
   })
 
+  it('records a sensitive-window refusal with the title but no screen content', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordSensitiveWindow({ sessionId: 'sess-1', windowTitle: 'KeePass 2', pattern: 'keepass' })
+
+    const lines = await waitForLines(config.auditLogPath, 1)
+    expect(lines[0]).toMatchObject({
+      kind: 'danger/sensitive-window', severity: 'high',
+      windowTitle: 'KeePass 2', pattern: 'keepass', sessionId: 'sess-1',
+    })
+  })
+
+  it('records lifecycle lines keyed by event name', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordLifecycle({
+      event: 'mounted', platform: 'win32', visionRoutesConfigured: true,
+      visionRoute: 'vp/vm', changeDetectionRoute: 'cp/cm',
+    })
+    auditor.recordLifecycle({ event: 'routes-missing', missing: ['visionModel'] })
+    auditor.recordLifecycle({ event: 'sidecar-starting', mode: 'prod', description: 'prod binary x' })
+    auditor.recordLifecycle({ event: 'sidecar-connected', version: '0.1.1' })
+    auditor.recordLifecycle({ event: 'sidecar-exited', exitCode: 0, signal: null, trigger: 'shutdown' })
+    auditor.recordLifecycle({ event: 'paused', reason: 'hotkey' })
+    auditor.recordLifecycle({ event: 'resumed', reason: 'user-input' })
+
+    const lines = await waitForLines(config.auditLogPath, 7)
+    expect(lines.map(line => line.kind)).toEqual([
+      'lifecycle/mounted',
+      'lifecycle/routes-missing',
+      'lifecycle/sidecar-starting',
+      'lifecycle/sidecar-connected',
+      'lifecycle/sidecar-exited',
+      'lifecycle/paused',
+      'lifecycle/resumed',
+    ])
+    expect(lines[0]).toMatchObject({ platform: 'win32', visionRoutesConfigured: true, visionRoute: 'vp/vm' })
+    expect(lines[1]).toMatchObject({ missing: ['visionModel'] })
+    expect(lines[4]).toMatchObject({ exitCode: 0, signal: null, trigger: 'shutdown' })
+    expect(lines[5]).toMatchObject({ reason: 'hotkey' })
+    expect(lines[6]).toMatchObject({ reason: 'user-input' })
+  })
+
   it('serializes concurrent appends into one line per event', async () => {
     const ctx = new Context()
     const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })

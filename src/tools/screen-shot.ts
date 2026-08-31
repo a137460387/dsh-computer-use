@@ -10,6 +10,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ScreenShot } from '../definition/index.ts'
+import { SensitiveWindowRefusal } from '../security/refusals.ts'
 import { computerUse, type ToolDeps } from './shared.ts'
 
 /** Boundary guidance shared by every computer-use tool description. */
@@ -79,10 +81,22 @@ export function registerScreenShot(ctx: Context, deps: ToolDeps): void {
     },
     async execute(args, exec) {
       const runtime = computerUse(ctx)
-      const shot = await runtime.screenShot({
-        maxWidth: args.maxWidth ?? deps.config.screenshotMaxWidth,
-        quality: args.quality ?? deps.config.screenshotQuality,
-      })
+      let shot: ScreenShot
+      try {
+        shot = await runtime.screenShot({
+          maxWidth: args.maxWidth ?? deps.config.screenshotMaxWidth,
+          quality: args.quality ?? deps.config.screenshotQuality,
+        })
+      } catch (error) {
+        if (error instanceof SensitiveWindowRefusal) {
+          deps.auditor.recordSensitiveWindow({
+            ...exec.agent !== undefined ? { sessionId: String(exec.agent.session.id) } : {},
+            windowTitle: error.facts.windowTitle,
+            pattern: error.facts.pattern,
+          })
+        }
+        throw error
+      }
 
       // Change detection against the previous frame, token-saving fast paths first.
       let screenChanged = true
