@@ -16,6 +16,7 @@ overrides:
   '@deepseek-ai/dsh-timeout': link:../deepseek-harness/packages/util/timeout
   '@deepseek-ai/dsh-tools': link:../deepseek-harness/packages/core/tools
   '@deepseek-ai/dsh-user-approval': link:../deepseek-harness/packages/interaction/user-approval
+  '@deepseek-ai/dsh-util-values': link:../deepseek-harness/packages/util/values
 
 importers:
 
@@ -51,6 +52,9 @@ importers:
       '@deepseek-ai/dsh-user-approval':
         specifier: link:../deepseek-harness/packages/interaction/user-approval
         version: link:../deepseek-harness/packages/interaction/user-approval
+      '@deepseek-ai/dsh-util-values':
+        specifier: link:../deepseek-harness/packages/util/values
+        version: link:../deepseek-harness/packages/util/values
       '@deepseek-ai/schemastery':
         specifier: link:../deepseek-harness/vendor/schemastery
         version: link:../deepseek-harness/vendor/schemastery

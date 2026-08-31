@@ -37,6 +37,7 @@
     "@deepseek-ai/dsh-timeout": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-user-approval": "*",
+    "@deepseek-ai/dsh-util-values": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
@@ -50,6 +51,7 @@
     "@deepseek-ai/dsh-timeout": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-user-approval": "*",
+    "@deepseek-ai/dsh-util-values": "*",
     "@deepseek-ai/schemastery": "*",
     "@types/node": "^22.20.0",
     "@vitest/coverage-v8": "^4.1.11",
@@ -69,7 +71,8 @@
       "@deepseek-ai/dsh-subprocess": "link:../deepseek-harness/packages/subprocess/subprocess",
       "@deepseek-ai/dsh-timeout": "link:../deepseek-harness/packages/util/timeout",
       "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools",
-      "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval"
+      "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval",
+      "@deepseek-ai/dsh-util-values": "link:../deepseek-harness/packages/util/values"
     }
   }
 }
