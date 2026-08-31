@@ -443,3 +443,73 @@ Node 侧 `parseSensitiveWindowFacts` 解析成类型化错误
 - PyInstaller 产物重建：89.5 MiB，SHA256
   `effd0cd77d71fd283ab2b7be5d247347fbbaf97cd92db13ad62d641ad61619f2`；
   对产物复跑协议冒烟（版本 0.1.1、九工具面、暂停回路、通知）通过。
+
+## Phase 4.1 交付结论（真实环境缺陷修复，2026-08-31）
+
+真实环境验证（步骤 1-5）发现三处缺陷，证据均在
+`C:\Users\luoguangyu\.dsh\logs\dsh-cu-audit.log`：`lifecycle/mounted` 全日志
+0 条（D1），`sidecar-connected` 后 319ms 即误报 `paused(user-input)` 且当时
+无任何用户输入（D2），Node/Python 版本不齐（D3）。单一提交修复
+D1+D2+D3；D4 只记录。
+
+### P4.1-1：审计 sweep 串行化（D1）
+
+**根因**：`createAuditor` 的启动保留期清扫独立于 `AuditLog` 串行追加队列
+异步执行（readFile→filter→writeFile）；`apply()` 在清扫读取文件之后追加的
+`mounted` 行被清扫的 `writeFile` 整体覆盖。
+
+**修复**：`AuditLog` 新增 `compact(keep)`——把整文件重写排进同一条串行队列
+（返回 Promise，调用方可等待落盘）；清扫更名 `runRetentionSweep` 并经
+`log.compact` 执行；`Auditor` 接口新增 `sweepRetention(): Promise<void>`
+（可触发并等待的操作入口，回归测试也用它）。不变式：**sweep 之前入队的追加
+进入重写后的内容，之后入队的原样落盘**——两种时序下挂载期行都不可能丢。
+
+回归测试（确定性、无 sleep）：预置一条过期行 → mount → 立即追加新行 →
+`await auditor.sweepRetention()` → 断言仅剩新行、过期行被清理。
+
+### P4.1-2：暂停监控启动误报（D2，阻断级）
+
+**根因**：监控线程启动后立即开始检测；`GetAsyncKeyState`「自上次调用以来
+按下」的低位锁存与启动最初几帧的光标位移可能被启动前输入污染（例如提交
+任务的那次按键），单次全量冲刷不足以防御，实测启动 319ms 即误报
+`paused(user-input)`，阻断全部四个动作工具。
+
+**修复**：
+
+1. 检测判定抽成纯可测单元 `MonitorState`（`arm(cursor)` / `feed(...)`），
+   ctypes 只留在轮询循环里；决策逻辑注入假时钟全确定性单测（无 sleep）。
+2. arming 前对每个被监控键（热键 VK ∪ 键盘扫描区 0x08..0xFE）各调一次
+   `GetAsyncKeyState` 清除低位锁存；光标基线在 `arm` 之前建立。
+3. **启动 grace 窗口**：Config 新增 `monitorStartupGraceMs`（默认 500），
+   经 `DSH_CU_MONITOR_STARTUP_GRACE_MS` 传到 sidecar；窗口内丢弃一切检测
+   （含热键切换），但边缘状态（组合键按住、光标位置）持续更新——跨窗口
+   持续的状态不会在窗口结束瞬间误触发。
+
+既有语义保持：在途窗口与动作后宽限豁免、grace 后用户输入即暂停、热键切换
+暂停/恢复。新增 12 个 `MonitorState` 测试：陈旧锁存不暂停、grace 内不暂停、
+grace 后移动/按键暂停、在途豁免、热键边缘触发等。
+
+### P4.1-3：版本对齐（D3）
+
+Node 侧 `package.json` 0.1.0→0.1.1；provider 的 MCP 客户端身份版本提为
+常量 `PLUGIN_VERSION = '0.1.1'`，注释标明与 `package.json` 及
+`src-python/main.py` `VERSION` 的两处同步点；Python 侧 `VERSION` 加同向注释。
+
+### P4.1-4：只记录（D4）
+
+- 接管热键为 50ms 轮询检测，合成按键需按住 ≥100ms 才能可靠命中
+  （README Known Limitations 新增）。
+- 设计说明：pause-on-user-input 视任何真实 OS 输入（含自动化输入）为用户
+  输入；自动化验证须提交后零输入被动观察（README Known Limitations 新增）。
+- 热键轮询漏掉短暂合成按键的问题本身不在本次修复范围。
+
+### P4.1-5：验证结果
+
+- `npx tsc --noEmit` 零错误；`vitest run` 115/115（114 旧 + 1 D1 回归）；
+  `python -m unittest discover -s tests/python` 31/31（19 旧 + 12 新）。
+- PyInstaller 重建（构建前终止了两个占用二进制的在运行 sidecar 进程——
+  部署的 `dsh web` 子进程，provider 会在下次调用时自动重拉）：
+  89.5 MiB，SHA256
+  `33a3bc1d6bcf83af9ec3b8171ae57ee62a0f96637010e3a8521b02db99fb377b`。
+- 对产物冒烟：版本 0.1.1、九工具面、监控启动日志出现
+  `startup grace 500ms`、干净退出（exit 0）。

@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-use",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop-level Computer Use (vision control) bundle for DeepSeek Harness: screenshots, clicks, typing, scrolling, and hotkeys driven by a vision model over a Python MCP sidecar.",
   "type": "module",
   "main": "index.ts",

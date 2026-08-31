@@ -157,6 +157,25 @@ describe('createAuditor', () => {
     expect(lines[0]).toMatchObject({ actionType: 'scroll' })
   })
 
+  it('keeps a mount-time append alive through a retention sweep (race regression)', async () => {
+    const ctx = new Context()
+    const auditLogPath = join(workRoot, `race-${Math.random().toString(36).slice(2)}.log`)
+    const expired = new Date(Date.now() - 30 * 86_400_000).toISOString()
+    await writeFile(auditLogPath, `${JSON.stringify({ kind: 'action/before', timestamp: expired, actionType: 'click_at' })}\n`, 'utf8')
+
+    const config = testConfig({ auditLogPath })
+    const auditor = createAuditor(ctx, config)
+    // The mount-time append rides the serial queue between the startup sweep
+    // and this awaited sweep; the rewrite must not overwrite it either way.
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'fresh', atMs: Date.now() })
+    await auditor.sweepRetention()
+
+    const raw = await readFile(auditLogPath, 'utf8')
+    const lines = raw.split('\n').filter(line => line.trim() !== '').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ kind: 'action/before', actionType: 'scroll', detail: 'fresh' })
+  })
+
   it('prunes archived screenshots older than the retention window at startup', async () => {
     const { mkdir, utimes, readdir } = await import('node:fs/promises')
     const ctx = new Context()

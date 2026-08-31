@@ -57,6 +57,13 @@ import { normalizeHotkey } from '../tools/shared.ts'
 /** Sidecar protocol version prefix this plugin is compatible with. */
 const COMPATIBLE_SERVER_PREFIX = '0.1.'
 
+/**
+ * Plugin identity version reported during the MCP handshake.
+ * Sync point: keep aligned with package.json `version` and
+ * src-python/main.py `VERSION` (one release moves all three).
+ */
+const PLUGIN_VERSION = '0.1.1'
+
 /** Diagnostic tail retained from sidecar stderr. */
 const STDERR_DIAGNOSTIC_BYTES = 65_536
 
@@ -323,6 +330,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         DSH_CU_TAKEOVER_HOTKEY: normalizeHotkey(this.config.takeoverHotkey),
         DSH_CU_PAUSE_ON_USER_INPUT: this.config.pauseOnUserInput ? '1' : '0',
         DSH_CU_USER_INPUT_GRACE_MS: String(this.config.userInputGraceMs),
+        DSH_CU_MONITOR_STARTUP_GRACE_MS: String(this.config.monitorStartupGraceMs),
         DSH_CU_SENSITIVE_WINDOW_PATTERNS: JSON.stringify(this.config.sensitiveWindowPatterns),
         DSH_CU_SENSITIVE_WINDOW_ALLOWLIST: JSON.stringify(this.config.sensitiveWindowAllowlist),
         PYTHONIOENCODING: 'utf-8',
@@ -355,7 +363,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     const transport = new SidecarTransport(handle)
     transport.onSidecarNotification = message => this.handleSidecarNotification(message)
     const client = new Client(
-      { name: 'dsh-computer-use', version: '0.1.0' },
+      { name: 'dsh-computer-use', version: PLUGIN_VERSION },
       { capabilities: {} },
     )
     transport.onclose = () => {

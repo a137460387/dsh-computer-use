@@ -69,6 +69,12 @@ export interface ComputerUseConfig {
    */
   readonly userInputGraceMs: number
   /**
+   * Grace in milliseconds after the sidecar monitor arms during which every
+   * user-input detection is discarded, so key state latched before startup
+   * (the keystrokes that launched the run) never pauses desktop control.
+   */
+  readonly monitorStartupGraceMs: number
+  /**
    * Foreground-window title regexes that refuse screenshot capture outright
    * (password managers, online banking, ...); matched case-insensitively.
    */
@@ -142,6 +148,7 @@ export const Config: z<ComputerUseConfig> = z.object({
   takeoverHotkey: z.array(String).default(['ctrl', 'alt', 'u']),
   pauseOnUserInput: z.boolean().default(true),
   userInputGraceMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(250),
+  monitorStartupGraceMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(500),
   sensitiveWindowPatterns: z.array(String).default([
     '1password',
     'keepass',

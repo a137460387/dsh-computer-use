@@ -5,8 +5,10 @@ Two independent user-takeover signals pause desktop control:
 - The takeover hotkey (polled via ``GetAsyncKeyState``) toggles pause/resume.
 - Any user cursor movement or key press pauses, EXCEPT inside the
   agent-action in-flight window (one of click_at/type_text/scroll/hotkey
-  currently executing) and a short grace window after each action ends —
-  within those windows the sidecar's own synthetic input must not count.
+  currently executing), the short grace window after each action ends, and
+  the startup grace window after the monitor arms — within those windows the
+  sidecar's own synthetic input (or key state latched before startup) must
+  not count.
 
 While paused, the four action tools refuse with a marker-prefixed error;
 screen_shot, get_display_info, resume_actions, and pause_actions keep
@@ -122,6 +124,79 @@ class PauseState:
             self._on_transition(paused, reason)
 
 
+class MonitorState:
+    """Poll-by-poll takeover detection, free of platform calls (unit-testable).
+
+    ``feed`` turns one poll's raw observations into at most one detection:
+
+    - ``"hotkey"`` — the takeover combo was pressed (the caller toggles the
+      pause state);
+    - ``"user-input"`` — the cursor moved or a key went down outside every
+      exemption window;
+    - ``None`` — nothing detected.
+
+    Startup handling: ``arm`` records the cursor baseline and opens the
+    startup grace window; every detection is discarded until the window
+    expires, so key state latched before the sidecar started (the keystrokes
+    that launched it) never registers as the user taking over. Edge state
+    (combo held, cursor position) keeps updating during the window, so a
+    condition persisting across the window does not fire the moment it ends.
+    """
+
+    def __init__(self, startup_grace_ms: int, clock=time.monotonic) -> None:
+        self._startup_grace_ms = startup_grace_ms
+        self._clock = clock
+        self._armed_at: float | None = None
+        self._combo_was_down = False
+        self._last_cursor: tuple[int, int] | None = None
+
+    def arm(self, cursor: tuple[int, int] | None) -> None:
+        """Open the startup grace window with the cursor baseline captured."""
+        self._armed_at = self._clock()
+        self._last_cursor = cursor
+
+    def feed(
+        self,
+        *,
+        combo_down: bool,
+        key_down: bool,
+        cursor: tuple[int, int] | None,
+        pause_on_user_input: bool,
+        paused: bool,
+        suppressed: bool,
+    ) -> str | None:
+        """Decide one poll from raw observations; see the class docs."""
+        if self._armed_at is None:
+            return None
+        if (self._clock() - self._armed_at) * 1000 < self._startup_grace_ms:
+            self._combo_was_down = combo_down
+            if cursor is not None:
+                self._last_cursor = cursor
+            return None
+
+        detected: str | None = None
+        if combo_down and not self._combo_was_down:
+            detected = "hotkey"
+        self._combo_was_down = combo_down
+
+        moved = False
+        if cursor is not None:
+            if self._last_cursor is not None and cursor != self._last_cursor:
+                moved = True
+            self._last_cursor = cursor
+
+        if (
+            detected is None
+            and pause_on_user_input
+            and not paused
+            and not combo_down  # still holding the takeover combo is not "typing"
+            and not suppressed
+            and (moved or key_down)
+        ):
+            detected = "user-input"
+        return detected
+
+
 # Virtual-key codes for the takeover-hotkey vocabulary (Windows). Single
 # letters and digits resolve through ord(); F-keys through 0x70 + n - 1.
 _VIRTUAL_KEYS: dict[str, int] = {
@@ -183,8 +258,11 @@ def start_monitor(state: PauseState, monitor_config: dict) -> threading.Thread |
 
     Polls ``GetAsyncKeyState`` for the takeover hotkey (toggle) and — when
     enabled and unsuppressed — for user cursor movement or any key press.
-    Returns the thread, or None on platforms without a ctypes backend
-    (macOS: pause monitoring is unavailable; resume_actions still works).
+    Startup flushes every monitored key's "pressed since last call" latch,
+    captures the cursor baseline, and discards all detections for the
+    configured startup grace window. Returns the thread, or None on platforms
+    without a ctypes backend (macOS: pause monitoring is unavailable;
+    resume_actions still works).
     """
     if sys.platform != "win32":
         _log("Windows-only monitor unavailable on this platform; takeover hotkey and user-input pause are disabled")
@@ -193,6 +271,7 @@ def start_monitor(state: PauseState, monitor_config: dict) -> threading.Thread |
     hotkey_vks = resolve_hotkey_vks(list(monitor_config.get("hotkey", [])))
     pause_on_user_input = bool(monitor_config.get("pause_on_user_input", True))
     grace_ms = int(monitor_config.get("grace_ms", 250))
+    startup_grace_ms = int(monitor_config.get("startup_grace_ms", 500))
 
     import ctypes
     from ctypes import wintypes
@@ -206,37 +285,39 @@ def start_monitor(state: PauseState, monitor_config: dict) -> threading.Thread |
         # 0x08..0xFE covers the keyboard VK range (mouse buttons excluded).
         return any(user32.GetAsyncKeyState(vk) & 0x8001 for vk in range(0x08, 0xFF))
 
+    def _cursor_pos() -> tuple[int, int] | None:
+        point = wintypes.POINT()
+        if user32.GetCursorPos(ctypes.byref(point)):
+            return (int(point.x), int(point.y))
+        return None
+
     def _loop() -> None:
-        # Flush the first-query latch of the "pressed since last call" bit so
-        # key state predating this process does not register as user input.
-        _any_key_down()
-        combo_was_down = False
-        last_pos: tuple[int, int] | None = None
+        # Flush the "pressed since last call" latch of every monitored key so
+        # key state predating this process (the keystrokes that launched it)
+        # does not register as user input.
+        for vk in sorted(set(hotkey_vks) | set(range(0x08, 0xFF))):
+            user32.GetAsyncKeyState(vk)
+        # The cursor baseline precedes arming: detection only starts once the
+        # startup grace window opens, and it compares against this position.
+        monitor = MonitorState(startup_grace_ms)
+        monitor.arm(_cursor_pos())
         while True:
             try:
-                combo_down = _combo_down()
-                if combo_down and not combo_was_down:
+                decision = monitor.feed(
+                    combo_down=_combo_down(),
+                    key_down=_any_key_down(),
+                    cursor=_cursor_pos(),
+                    pause_on_user_input=pause_on_user_input,
+                    paused=state.paused,
+                    suppressed=state.input_suppressed(grace_ms),
+                )
+                if decision == "hotkey":
                     if state.paused:
                         state.resume("hotkey")
                     else:
                         state.pause("hotkey")
-                combo_was_down = combo_down
-
-                if (
-                    pause_on_user_input
-                    and not state.paused
-                    and not combo_down  # still holding the takeover combo is not "typing"
-                    and not state.input_suppressed(grace_ms)
-                ):
-                    moved = False
-                    point = wintypes.POINT()
-                    if user32.GetCursorPos(ctypes.byref(point)):
-                        position = (int(point.x), int(point.y))
-                        if last_pos is not None and position != last_pos:
-                            moved = True
-                        last_pos = position
-                    if moved or _any_key_down():
-                        state.pause("user-input")
+                elif decision == "user-input":
+                    state.pause("user-input")
             except Exception as error:  # keep the monitor alive across a bad poll
                 _log(f"poll failed: {error}")
             time.sleep(_POLL_SECONDS)
@@ -245,6 +326,7 @@ def start_monitor(state: PauseState, monitor_config: dict) -> threading.Thread |
     thread.start()
     _log(
         f"started (hotkey {'+'.join(monitor_config.get('hotkey', [])) or 'disabled'}, "
-        f"user-input pause {'on' if pause_on_user_input else 'off'}, grace {grace_ms}ms)"
+        f"user-input pause {'on' if pause_on_user_input else 'off'}, grace {grace_ms}ms, "
+        f"startup grace {startup_grace_ms}ms)"
     )
     return thread

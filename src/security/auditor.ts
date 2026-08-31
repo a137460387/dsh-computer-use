@@ -71,30 +71,72 @@ export interface Auditor {
   recordSensitiveWindow(record: SensitiveWindowAuditRecord): void
   /** Log one lifecycle transition (mount, sidecar lifetime, pause/resume). */
   recordLifecycle(event: LifecycleEvent): void
+  /** Run one retention sweep now; resolves when the pruning hits disk. */
+  sweepRetention(): Promise<void>
 }
 
-/** One append behind a serial queue so concurrent events never interleave. */
+/**
+ * Append-only audit file behind one serial queue: appends never interleave,
+ * and the retention rewrite rides the same queue, so a sweep can never
+ * overwrite an append that was queued around it.
+ */
 class AuditLog {
   private queue: Promise<unknown> = Promise.resolve()
   private dirEnsured = false
 
   constructor(private readonly path: string) {}
 
+  /** Queue one JSON line; a failed append never breaks the serial chain. */
   append(line: Record<string, unknown>): void {
-    this.queue = this.queue.then(async () => {
-      if (!this.dirEnsured) {
-        await mkdir(dirname(this.path), { recursive: true })
-        this.dirEnsured = true
-      }
+    void this.enqueue(async () => {
+      await this.ensureDir()
       await appendFile(this.path, `${JSON.stringify(line)}\n`, 'utf8')
-    }, () => {})
+    }).catch(() => {
+      // Append I/O failures stay swallowed at the queue tail: the audit sink
+      // must not surface an unhandled rejection into its host, and the chain
+      // already continues past a rejected step.
+    })
+  }
+
+  /**
+   * Rewrite the file as one queued step. Appends queued before the rewrite
+   * land in the rewritten content; appends queued after it land untouched.
+   * @param keep - per-line predicate; blank lines are dropped regardless.
+   * @returns resolves when the rewrite hits disk; rejects on I/O failure.
+   */
+  compact(keep: (rawLine: string) => boolean): Promise<void> {
+    return this.enqueue(async () => {
+      let raw: string
+      try {
+        raw = await readFile(this.path, 'utf8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
+      }
+      const kept = raw.split('\n').filter(rawLine => rawLine.trim() !== '' && keep(rawLine))
+      await writeFile(this.path, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8')
+    })
+  }
+
+  private async ensureDir(): Promise<void> {
+    if (this.dirEnsured) return
+    await mkdir(dirname(this.path), { recursive: true })
+    this.dirEnsured = true
+  }
+
+  /** Chain one step behind the queue; later steps survive a rejected step. */
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const run: Promise<void> = this.queue.then(work, work)
+    this.queue = run.then(() => undefined, () => undefined)
+    return run
   }
 }
 
 /**
  * Mount the auditor: event listeners for both action phases, the danger
- * channel, and one startup retention sweep. All registrations unwind with the
- * mounting fiber.
+ * channel, and one startup retention sweep serialized behind the append
+ * queue (it can never overwrite a line queued at mount). All registrations
+ * unwind with the mounting fiber.
  * @param ctx - host context carrying the event stream.
  * @param config - validated deployment policy (paths and retention).
  * @returns the danger channel.
@@ -128,7 +170,7 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
     })
   })
 
-  void sweepRetention(ctx, config)
+  void runRetentionSweep(ctx, config, log)
 
   return {
     recordDanger(record: DangerAuditRecord): void {
@@ -160,18 +202,20 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         ...facts,
       })
     },
+    sweepRetention: () => runRetentionSweep(ctx, config, log),
   }
 }
 
 /** Prune audit lines and archived screenshots past the retention window. */
-async function sweepRetention(ctx: Context, config: ComputerUseConfig): Promise<void> {
+async function runRetentionSweep(ctx: Context, config: ComputerUseConfig, log: AuditLog): Promise<void> {
   const cutoffMs = Date.now() - config.auditRetentionDays * 86_400_000
   try {
-    const raw = await readFile(config.auditLogPath, 'utf8')
-    const kept = raw.split('\n').filter((line) => {
-      if (line.trim() === '') return false
+    // The rewrite rides the append queue: an audit line queued before this
+    // sweep is part of the rewritten content, and one queued after it lands
+    // untouched, so the startup sweep can never drop a mount-time line.
+    await log.compact((rawLine) => {
       try {
-        const record = JSON.parse(line) as { timestamp?: unknown }
+        const record = JSON.parse(rawLine) as { timestamp?: unknown }
         if (typeof record.timestamp !== 'string') return true
         return new Date(record.timestamp).getTime() >= cutoffMs
       } catch {
@@ -179,11 +223,8 @@ async function sweepRetention(ctx: Context, config: ComputerUseConfig): Promise<
         return true
       }
     })
-    await writeFile(config.auditLogPath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8')
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      ctx.logger.warn(`dsh-computer-use: audit retention sweep failed: ${String(error)}`)
-    }
+    ctx.logger.warn(`dsh-computer-use: audit retention sweep failed: ${String(error)}`)
   }
   try {
     const entries = await readdir(config.screenshotArchivePath)

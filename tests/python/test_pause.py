@@ -1,4 +1,5 @@
-"""Unit tests for the sidecar pause state machine and sensitive-window policy.
+"""Unit tests for the sidecar pause state machine, the takeover-monitor
+detection unit, and the sensitive-window policy.
 
 Pure-Python surfaces only (no ctypes calls), so they run on every platform:
 
@@ -15,7 +16,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src-python"))
 
-from core.pause import PAUSED_MARKER, PausedError, PauseState, resolve_hotkey_vks  # noqa: E402
+from core.pause import (  # noqa: E402
+    PAUSED_MARKER,
+    MonitorState,
+    PausedError,
+    PauseState,
+    resolve_hotkey_vks,
+)
 from core.sensitive import (  # noqa: E402
     SENSITIVE_WINDOW_MARKER,
     SensitiveWindowError,
@@ -88,6 +95,134 @@ class PauseStateInFlight(unittest.TestCase):
         state = PauseState()
         state.end_action()
         self.assertFalse(state.input_suppressed(grace_ms=10_000))
+
+
+class FakeClock:
+    """Injected monotonic clock so detection tests never sleep."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _feed(monitor: MonitorState, **overrides) -> str | None:
+    """One poll with quiet defaults; tests override only what they exercise."""
+    args = dict(
+        combo_down=False,
+        key_down=False,
+        cursor=None,
+        pause_on_user_input=True,
+        paused=False,
+        suppressed=False,
+    )
+    args.update(overrides)
+    return monitor.feed(**args)
+
+
+class MonitorStateStartupGrace(unittest.TestCase):
+    """D2 regressions: the startup window discards every detection."""
+
+    def test_stale_key_latch_inside_the_grace_does_not_pause(self) -> None:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=500, clock=clock)
+        monitor.arm(cursor=(100, 100))
+        clock.advance(0.05)
+        # A key latched right after arming (predating any real user input).
+        self.assertIsNone(_feed(monitor, key_down=True))
+        clock.advance(0.5)
+        # Nothing carried over once the window closed.
+        self.assertIsNone(_feed(monitor))
+
+    def test_cursor_and_key_activity_inside_the_grace_is_discarded(self) -> None:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=500, clock=clock)
+        monitor.arm(cursor=(100, 100))
+        clock.advance(0.2)
+        self.assertIsNone(_feed(monitor, cursor=(300, 300), key_down=True))
+        clock.advance(0.2)  # still inside the window
+        self.assertIsNone(_feed(monitor, cursor=(301, 301)))
+
+    def test_cursor_baseline_refreshes_during_the_grace(self) -> None:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=500, clock=clock)
+        monitor.arm(cursor=(100, 100))
+        clock.advance(0.3)
+        self.assertIsNone(_feed(monitor, cursor=(900, 900)))  # move inside grace
+        clock.advance(0.3)  # window closed
+        self.assertIsNone(_feed(monitor, cursor=(900, 900)))  # still → no fire
+        self.assertEqual(_feed(monitor, cursor=(901, 900)), "user-input")
+
+    def test_combo_held_across_the_grace_does_not_toggle_on_exit(self) -> None:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=500, clock=clock)
+        monitor.arm(cursor=None)
+        clock.advance(0.1)
+        self.assertIsNone(_feed(monitor, combo_down=True))  # discarded in grace
+        clock.advance(0.5)
+        self.assertIsNone(_feed(monitor, combo_down=True))  # edge tracked, no toggle
+        self.assertIsNone(_feed(monitor, combo_down=False))
+        self.assertEqual(_feed(monitor, combo_down=True), "hotkey")
+
+
+class MonitorStateDecisions(unittest.TestCase):
+    """Post-grace semantics: user input pauses, exemptions hold, hotkey toggles."""
+
+    def armed(self, grace_ms: int = 0) -> tuple[MonitorState, FakeClock]:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=grace_ms, clock=clock)
+        monitor.arm(cursor=(100, 100))
+        clock.advance(0.05)  # past any startup grace under test
+        return monitor, clock
+
+    def test_movement_after_the_grace_detects_user_input(self) -> None:
+        monitor, _ = self.armed()
+        self.assertIsNone(_feed(monitor, cursor=(100, 100)))  # cursor still
+        self.assertEqual(_feed(monitor, cursor=(120, 100)), "user-input")
+
+    def test_keypress_after_the_grace_detects_user_input(self) -> None:
+        monitor, _ = self.armed()
+        self.assertEqual(_feed(monitor, cursor=(100, 100), key_down=True), "user-input")
+
+    def test_suppressed_window_blocks_user_input_detection(self) -> None:
+        monitor, _ = self.armed()
+        self.assertIsNone(_feed(monitor, key_down=True, suppressed=True))
+        self.assertIsNone(_feed(monitor, cursor=(150, 150), suppressed=True))
+        self.assertEqual(_feed(monitor, key_down=True), "user-input")
+
+    def test_paused_blocks_user_input_but_hotkey_still_toggles(self) -> None:
+        monitor, _ = self.armed()
+        self.assertIsNone(_feed(monitor, key_down=True, paused=True))
+        self.assertEqual(_feed(monitor, combo_down=True, paused=True), "hotkey")
+
+    def test_disabled_user_input_pause_detects_nothing_but_hotkey(self) -> None:
+        monitor, _ = self.armed()
+        self.assertIsNone(_feed(monitor, key_down=True, pause_on_user_input=False))
+        self.assertEqual(_feed(monitor, combo_down=True, pause_on_user_input=False), "hotkey")
+
+    def test_hotkey_detection_is_edge_triggered(self) -> None:
+        monitor, _ = self.armed()
+        self.assertEqual(_feed(monitor, combo_down=True), "hotkey")
+        self.assertIsNone(_feed(monitor, combo_down=True))  # still held
+        self.assertIsNone(_feed(monitor, combo_down=False))  # released
+        self.assertEqual(_feed(monitor, combo_down=True), "hotkey")  # pressed again
+
+    def test_missing_cursor_position_keeps_the_baseline(self) -> None:
+        clock = FakeClock()
+        monitor = MonitorState(startup_grace_ms=0, clock=clock)
+        monitor.arm(cursor=None)
+        clock.advance(0.05)
+        self.assertIsNone(_feed(monitor, cursor=None))
+        self.assertIsNone(_feed(monitor, cursor=(50, 50)))  # first fix is the baseline
+        self.assertEqual(_feed(monitor, cursor=(60, 50)), "user-input")
+
+    def test_feed_before_arming_detects_nothing(self) -> None:
+        monitor = MonitorState(startup_grace_ms=0, clock=FakeClock())
+        self.assertIsNone(_feed(monitor, key_down=True, cursor=(1, 1)))
 
 
 class ResolveHotkeyVks(unittest.TestCase):

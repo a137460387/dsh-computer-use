@@ -12,6 +12,7 @@ side layers them over the scrubbed parent environment):
 - DSH_CU_TAKEOVER_HOTKEY           canonical hotkey, '+'-joined (default ctrl+alt+u; empty disables)
 - DSH_CU_PAUSE_ON_USER_INPUT       "1"/"0" user-input pause (default 1)
 - DSH_CU_USER_INPUT_GRACE_MS       post-action detection grace in ms (default 250)
+- DSH_CU_MONITOR_STARTUP_GRACE_MS  startup detection grace in ms (default 500)
 - DSH_CU_SENSITIVE_WINDOW_PATTERNS JSON array of title regexes refusing capture
 - DSH_CU_SENSITIVE_WINDOW_ALLOWLIST JSON array of title regexes beating the blocklist
 
@@ -30,6 +31,8 @@ import sys
 import threading
 import time
 
+# Sync point: keep aligned with the Node side's package.json "version" and
+# the MCP client identity version in src/provider-mcp/index.ts.
 VERSION = "0.1.1"
 SERVER_NAME = "dsh-cu-server"
 
@@ -66,6 +69,7 @@ def _config() -> dict:
         "hotkey": hotkey,
         "pause_on_user_input": os.environ.get("DSH_CU_PAUSE_ON_USER_INPUT", "1") == "1",
         "grace_ms": int(os.environ.get("DSH_CU_USER_INPUT_GRACE_MS", "250")),
+        "startup_grace_ms": int(os.environ.get("DSH_CU_MONITOR_STARTUP_GRACE_MS", "500")),
     }
 
     try:

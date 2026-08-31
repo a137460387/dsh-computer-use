@@ -73,6 +73,7 @@ The bundle ships **UNCONFIGURED on purpose**: the four model-route fields defaul
                                       # empty list disables the hotkey
     # pauseOnUserInput: true          # user cursor movement / key presses pause
     # userInputGraceMs: 250           # post-action grace before input detection
+    # monitorStartupGraceMs: 500      # startup grace discarding input detections
 
     # ── Sensitive windows ──
     # sensitiveWindowPatterns: [...]  # title regexes refusing capture; schema
@@ -116,6 +117,8 @@ Key facts:
 - The production binary is large (~90 MiB single-file PyInstaller bundle) and platform-specific; build it on the platform that runs it.
 - **No session isolation — one physical cursor.** Windows exposes a single interactive session: two parallel Computer Use runs (or the user working beside the agent) share one cursor and one foreground window and WILL collide. Synthetic-cursor / per-session isolation is a research item and not implemented; run one desktop-control session at a time.
 - **Sensitive-window detection matches window TITLES, not pixels.** OCR-level detection of sensitive fields (a password box rendered inside an ordinary window) is not implemented; an untitled or generically titled sensitive window is not caught. The takeover hotkey is polling-based (`GetAsyncKeyState`), not a registered system hotkey, and is only active while the sidecar runs.
+- **The takeover hotkey is detected by a 50 ms poll.** The monitor samples `GetAsyncKeyState` every 50 ms, so a synthetic key press held for less than one poll interval (below ~100 ms) can fall between two samples and be missed; hold the combo for at least 100 ms when triggering the takeover programmatically.
+- **pause-on-user-input cannot tell automation from the user.** Detection watches real OS input events, so input injected by ANY automation (test drivers, another Computer Use session, macro tools) counts as the user taking over and pauses the action tools. Automated verification of this plugin must submit the task, then observe passively with zero input until the run finishes.
 - **Pause monitoring and the sensitive-window gate are Windows-only** (pure ctypes; no new dependencies). On macOS the monitor does not run (the takeover hotkey and user-input pause are unavailable; `resume_actions` still works) and the capture gate cannot read window titles, so capture is fail-open there.
 - **Pausing interacts with approval waits.** A high-risk action's interactive approval is NOT an in-flight window: moving the mouse to click "allow" pauses desktop control, and the approved action is then refused until resumed (hotkey again or `resume_actions`).
 - Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; the medium-risk auto-approval answerer can be shadowed by a remote approval bridge in `dsh web` (waterfall registration order); `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and approval-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, and lifecycle transitions are audited).

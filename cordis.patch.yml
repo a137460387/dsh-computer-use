@@ -35,6 +35,7 @@
 #       takeoverHotkey: [ctrl, alt, u]     # pauses/resumes actions; empty disables
 #       pauseOnUserInput: true
 #       userInputGraceMs: 250
+#       monitorStartupGraceMs: 500
 #       sensitiveWindowPatterns:           # title regexes refusing capture
 #         - 1password
 #         - keepass
