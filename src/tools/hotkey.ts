@@ -29,8 +29,8 @@ export function registerHotkey(ctx: Context, deps: ToolDeps): void {
   ctx.tools.register(defineTool({
     name: 'hotkey',
     description: 'Press one key combination (e.g. ["ctrl","c"], ["alt","tab"]) in the desktop.'
-      + ' System-level shortcuts (win+r, win+i, win+x, win+l, alt+f4, ctrl+shift+esc) always ask'
-      + ' the user for confirmation.',
+      + ' System-level shortcuts (win+r, win+i, win+x, win+l, alt+f4, ctrl+shift+esc) always'
+      + ' require interactive confirmation and are refused outright in never-approval sessions.',
     parameters: {
       keys: { type: 'array', items: { type: 'string' }, required: true, description: 'Keys pressed together, e.g. ["ctrl", "c"].' },
       basedOnObservationId: { type: 'string', description: 'ObservationId of the screenshot being acted on.' },
@@ -63,7 +63,7 @@ export function registerHotkey(ctx: Context, deps: ToolDeps): void {
         ? 'high'
         : 'medium'
       const tier = await whitelistTier(ctx, deps, baseTier)
-      await requestApproval(ctx, exec, 'hotkey', tier, `press ${normalizeHotkey(args.keys)}`)
+      await requestApproval(ctx, deps, exec, 'hotkey', tier, `press ${normalizeHotkey(args.keys)}`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).hotkey({

@@ -88,6 +88,20 @@ describe('createAuditor', () => {
     })
   })
 
+  it('records a pre-dispatch auto-approval grant with session, tool, and tier', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordAutoApproval({ sessionId: 'sess-1', toolName: 'click_at', tier: 'medium' })
+
+    const lines = await waitForLines(config.auditLogPath, 1)
+    expect(lines[0]).toMatchObject({
+      kind: 'answer/auto-allowed', sessionId: 'sess-1', toolName: 'click_at', tier: 'medium',
+    })
+    expect(lines[0]?.timestamp).toEqual(expect.any(String))
+  })
+
   it('records lifecycle lines keyed by event name', async () => {
     const ctx = new Context()
     const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })

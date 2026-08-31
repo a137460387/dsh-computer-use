@@ -10,7 +10,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../answerer.ts'
+import { consultAnswerer, HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../answerer.ts'
+import type { RiskTier } from '../answerer.ts'
 import type { ComputerUseConfig } from '../config.ts'
 import type { ComputerUseRuntime } from '../definition/index.ts'
 import type { Auditor } from '../security/auditor.ts'
@@ -38,20 +39,30 @@ export function computerUse(ctx: Context): ComputerUseRuntime {
   return runtime
 }
 
-/** Risk tier for one approval decision. */
-export type RiskTier = 'medium' | 'high'
+export type { RiskTier }
 
 /**
- * Ask the approval seam for one decision with the tier marker embedded in the
- * reason; only `allowed-once` proceeds.
+ * Gate one action on its risk tier. Medium requests first consult the
+ * plugin's pre-dispatch answerer: inside the session's window/quota they are
+ * granted WITHOUT traversing the approval seam and the grant is written to
+ * the audit log; the host waterfall is structurally unreachable by this
+ * plugin (never-approval sessions are rejected before dispatch, ask sessions
+ * are answered by the host interactive answerer first), so no grant can be
+ * delegated to it. Everything else (high risk, exhausted quota) goes to
+ * `ctx.approval.request` with the tier marker embedded in the reason:
+ * interactive sessions confirm there, while never-approval (Full access)
+ * sessions reject deterministically — that rejection surfaces as
+ * configuration guidance instead of a bare "rejected".
  * @param ctx - context carrying the approval service.
+ * @param deps - bundle wiring carrying the policy and the audit sink.
  * @param exec - the tool execution being decided.
  * @param toolName - the tool the question is about.
- * @param tier - medium may be auto-granted by the answerer; high never is.
+ * @param tier - medium may be auto-granted pre-dispatch; high never is.
  * @param description - human-readable explanation for the prompt/audit.
  */
 export async function requestApproval(
   ctx: Context,
+  deps: ToolDeps,
   exec: ToolExecution,
   toolName: string,
   tier: RiskTier,
@@ -59,6 +70,11 @@ export async function requestApproval(
 ): Promise<void> {
   if (exec.agent === undefined) {
     throw new Error(`dsh-computer-use: ${toolName} needs an agent-scoped execution for approval decisions`)
+  }
+  const sessionId = String(exec.agent.session.id)
+  if (consultAnswerer(deps.config, sessionId, tier) === 'auto') {
+    deps.auditor.recordAutoApproval({ sessionId, toolName, tier })
+    return
   }
   const marker = tier === 'high' ? HIGH_RISK_MARKER : MEDIUM_RISK_MARKER
   const outcome = await ctx.approval.request({
@@ -72,11 +88,14 @@ export async function requestApproval(
     case 'allowed-once':
       return
     case 'rejected':
-      throw new Error(`dsh-computer-use: ${toolName} was rejected by the user`)
+    case 'unavailable':
+      throw new Error(
+        `dsh-computer-use: ${toolName} needs interactive approval (tier=${tier}) but none was granted; `
+        + 'never-approval (Full access) sessions refuse it without prompting — '
+        + 'switch the session to Workspace Write and retry',
+      )
     case 'cancelled':
       throw new Error(`dsh-computer-use: ${toolName} approval was cancelled`)
-    case 'unavailable':
-      throw new Error(`dsh-computer-use: ${toolName} needs approval but no answerer is available (fail closed)`)
     default:
       assertNever(outcome, 'approval outcome')
   }

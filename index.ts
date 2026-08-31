@@ -10,7 +10,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { registerAnswerer } from './src/answerer.ts'
 import type { ComputerUseConfig } from './src/config.ts'
 import McpComputerUseProvider from './src/provider-mcp/index.ts'
 import { createAuditor } from './src/security/auditor.ts'
@@ -85,11 +84,12 @@ function routesMissingError(missing: readonly string[]): Error {
 }
 
 /**
- * Mount the computer-use capability: security layer, vision bridge, approval
- * answerer, the MCP-backed service provider, and the seven model-facing
- * tools. The sidecar itself starts lazily at first service use, so mounting
- * stays cheap and binary resolution errors surface where they belong — first
- * call.
+ * Mount the computer-use capability: security layer, vision bridge, the
+ * MCP-backed service provider, and the seven model-facing tools. Approval
+ * decisions ride the tools' shared gate: medium risk may auto-grant
+ * pre-dispatch (audited), everything else traverses the host approval seam.
+ * The sidecar itself starts lazily at first service use, so mounting stays
+ * cheap and binary resolution errors surface where they belong — first call.
  * @param ctx - host context carrying the injected services.
  * @param config - validated {@link ComputerUseConfig}.
  */
@@ -119,7 +119,6 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
   const changeDetector = new ChangeDetector(vision, config.similarityThreshold)
   const deps: ToolDeps = { config, dangerFilter, breaker, auditor, changeDetector }
 
-  registerAnswerer(ctx, config)
   // Direct construction (the ApprovalService precedent): ctx.plugin forwards
   // a single config argument, and the provider additionally needs the auditor.
   // The Service constructor self-registers and unloads with this fiber.

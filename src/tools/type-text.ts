@@ -73,7 +73,7 @@ export function registerTypeText(ctx: Context, deps: ToolDeps): void {
 
       deps.breaker.assertCanAct()
       const tier = await whitelistTier(ctx, deps, 'medium')
-      await requestApproval(ctx, exec, 'type_text', tier, `type ${args.text.length} characters into the focused window`)
+      await requestApproval(ctx, deps, exec, 'type_text', tier, `type ${args.text.length} characters into the focused window`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).typeText({

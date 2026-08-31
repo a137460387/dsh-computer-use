@@ -9,7 +9,7 @@ This plugin gives a DSH agent desktop control for targets that browser/DOM tools
 - **Seven model-facing tools** — `screen_shot`, `get_display_info`, `click_at`, `type_text`, `scroll`, `hotkey`, `resume_actions`.
 - **A Python MCP sidecar** (`dsh-cu-server`) spawned through `ctx.subprocess`, speaking standard MCP JSON-RPC 2.0 over stdio. The sidecar owns all coordinate mathematics: the model emits pixels in *screenshot space*, and the sidecar maps them per-display with DPI awareness (Per-Monitor V2 on Windows, backing scale on macOS).
 - **Vision analysis through `ctx.llm`** on deployment-configured routes — screenshots persist through `ctx.attachments` as durable image blocks; the plugin never manages API keys or raw HTTP calls.
-- **A woven security layer** — tiered approval (medium-risk actions may auto-approve within a session window; high-risk always prompts), a danger-pattern filter on typed text, an ObservationId freshness gate, a no-change circuit breaker, per-session step ceilings, a window whitelist, and an append-only audit log with retention sweeps.
+- **A woven security layer** — tiered approval (medium-risk actions auto-approve pre-dispatch within a session window/quota, audited; high-risk always needs interactive confirmation), a danger-pattern filter on typed text, an ObservationId freshness gate, a no-change circuit breaker, per-session step ceilings, a window whitelist, and an append-only audit log with retention sweeps.
 - **User takeover detection** — a takeover hotkey (default `ctrl+alt+u`) and any user mouse/keyboard activity pause the four action tools until resumed; the pause state is audited and survives sidecar restarts.
 - **Sensitive-window capture refusal** — screenshots are refused before any pixel is captured when the foreground window title matches a deployment blocklist (password managers, online banking, ...); nothing is archived, persisted, or sent to a model.
 
@@ -81,9 +81,9 @@ The bundle ships **UNCONFIGURED on purpose**: the four model-route fields defaul
                                       # bitwarden, lastpass, netbank, 网银…
     # sensitiveWindowAllowlist: []    # title regexes beating the blocklist
 
-    # ── Approval answerer ──
+    # ── Approval answerer (pre-dispatch) ──
     autoApprovalWindowMs: 300000    # medium-risk auto-grant window
-    autoApprovalMaxGrants: 50       # grant ceiling per window
+    autoApprovalMaxGrants: 50       # grant ceiling per window, then interactive
 
     # ── Sidecar transport ──
     pythonCommand: python           # dev-mode interpreter
@@ -104,6 +104,7 @@ Key facts:
 - **Vision routes are provider+model pairs**, exactly as `ctx.llm` resolves them. The primary route must advertise image input; the change-detection route can be any cheap text+image model. Keys are resolved by the owning adapter — this plugin never sees them.
 - `dangerPatterns` is a mis-fire backstop, not a security boundary; the sidecar carries an aligned backstop of its own.
 - `allowedApps` turns any action against a non-whitelisted foreground window into a high-risk (interactive-confirmation) action; lookup failures fail closed to high risk as well.
+- **Approval semantics are a plugin pre-dispatch decision.** Medium-risk actions consult the plugin's answerer BEFORE the host approval seam: inside the session's `autoApprovalWindowMs` / `autoApprovalMaxGrants` quota they auto-grant (each grant writes an `answer/auto-allowed` audit line), so unattended sessions run without prompting. Everything else — high risk, or a medium request after the quota is spent — goes to `ctx.approval.request`: interactive (`ask`) sessions confirm there, while never-approval sessions (the Web UI "Full access" default) reject deterministically, and the tool surfaces that as configuration guidance (switch to Workspace Write) instead of a bare rejection. High-risk actions under Full access are fail-closed by design.
 - **Takeover semantics**: while desktop control is paused, `click_at`/`type_text`/`scroll`/`hotkey` are refused with recovery guidance; `screen_shot`, `get_display_info`, and `resume_actions` stay available. Resume by pressing the takeover hotkey again or calling `resume_actions`. The pause state is pushed to the plugin as an MCP notification, audited (`lifecycle/paused`, `lifecycle/resumed`), and re-engaged automatically if the sidecar restarts.
 - **Sensitive-window semantics**: the sidecar checks the foreground window title BEFORE capturing; a hit refuses the screenshot without archiving, persisting, or model-sending any pixels, and writes a `danger/sensitive-window` audit line (title logged, screen content never).
 
@@ -118,10 +119,11 @@ Key facts:
 - **No session isolation — one physical cursor.** Windows exposes a single interactive session: two parallel Computer Use runs (or the user working beside the agent) share one cursor and one foreground window and WILL collide. Synthetic-cursor / per-session isolation is a research item and not implemented; run one desktop-control session at a time.
 - **Sensitive-window detection matches window TITLES, not pixels.** OCR-level detection of sensitive fields (a password box rendered inside an ordinary window) is not implemented; an untitled or generically titled sensitive window is not caught. The takeover hotkey is polling-based (`GetAsyncKeyState`), not a registered system hotkey, and is only active while the sidecar runs.
 - **The takeover hotkey is detected by a 50 ms poll.** The monitor samples `GetAsyncKeyState` every 50 ms, so a synthetic key press held for less than one poll interval (below ~100 ms) can fall between two samples and be missed; hold the combo for at least 100 ms when triggering the takeover programmatically.
-- **pause-on-user-input cannot tell automation from the user.** Detection watches real OS input events, so input injected by ANY automation (test drivers, another Computer Use session, macro tools) counts as the user taking over and pauses the action tools. Automated verification of this plugin must submit the task, then observe passively with zero input until the run finishes.
+- **pause-on-user-input cannot tell automation from the user.** Detection watches real OS input events, so input injected by ANY automation counts as the user taking over and pauses the action tools — including the agent's OWN out-of-band automation (driving the UI through a shell tool like PowerShell UIAutomation instead of the computer-use tools), test drivers, other Computer Use sessions, and macro tools. Automated verification of this plugin must submit the task, then observe passively with zero input until the run finishes.
 - **Pause monitoring and the sensitive-window gate are Windows-only** (pure ctypes; no new dependencies). On macOS the monitor does not run (the takeover hotkey and user-input pause are unavailable; `resume_actions` still works) and the capture gate cannot read window titles, so capture is fail-open there.
 - **Pausing interacts with approval waits.** A high-risk action's interactive approval is NOT an in-flight window: moving the mouse to click "allow" pauses desktop control, and the approved action is then refused until resumed (hotkey again or `resume_actions`).
-- Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; the medium-risk auto-approval answerer can be shadowed by a remote approval bridge in `dsh web` (waterfall registration order); `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and approval-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, and lifecycle transitions are audited).
+- **Never-approval (Full access) sessions cannot run actions that need the seam.** High-risk actions — and medium-risk ones after the auto-approval quota is spent — require interactive confirmation; the host rejects never-approval sessions deterministically, and the plugin fails closed with guidance to switch the session to Workspace Write. This is intended: unattended Full access sessions keep working for in-quota medium actions while anything riskier stays blocked.
+- Design tensions recorded during development (kept deliberately, see DEVELOPMENT_LOG.md): the ObservationId TTL clock includes approval wait time; the no-change breaker counts actions refused after approval; `visionProvider.analyzeScreenshot` currently has no production call site (the main agent model locates targets itself); TTL-expired and seam-refused calls leave no audit entry (only executed actions, intercepted payloads, sensitive-window refusals, auto-approval grants, and lifecycle transitions are audited).
 
 ## Model Experience
 
@@ -146,7 +148,8 @@ The expected loop: `screen_shot` → decide from the returned image → one acti
 - **Stale or unknown `basedOnObservationId`** references are refused with guidance to capture a fresh screenshot.
 - **User takeover pauses actions.** The takeover hotkey (default `ctrl+alt+u`) or any user mouse/keyboard activity outside an in-flight action pauses the four action tools; they refuse with recovery guidance until the hotkey is pressed again or `resume_actions` is called. Observations stay available while paused.
 - **Sensitive windows refuse capture** before any pixel is grabbed (title blocklist, allowlist beats it); the refusal names the matched pattern and the allowlist escape hatch.
-- **System hotkeys** (`win+r`, `win+i`, `win+x`, `win+l`, `alt+f4`, `ctrl+shift+esc`) always prompt the user interactively, even inside an auto-approval window.
+- **Medium-risk actions auto-approve inside the session quota** — a pre-dispatch decision before the host approval seam, each grant leaving an `answer/auto-allowed` audit line. Once the quota is spent, medium requests need interactive confirmation like high-risk ones, and never-approval (Full access) sessions refuse them with configuration guidance.
+- **System hotkeys** (`win+r`, `win+i`, `win+x`, `win+l`, `alt+f4`, `ctrl+shift+esc`) always require interactive confirmation, even inside an auto-approval window; never-approval sessions refuse them outright.
 - **The no-change breaker** pauses the run after consecutive actions whose surrounding frames are perceptually identical (dHash distance within the similarity ceiling), asking for user intervention.
 - **The step ceiling** stops a session after `maxSteps` actions.
 

@@ -57,7 +57,7 @@ export function registerClickAt(ctx: Context, deps: ToolDeps): void {
       stepCounter.assert(sessionId, deps.config.maxSteps)
       deps.breaker.assertCanAct()
       const tier = await whitelistTier(ctx, deps, 'medium')
-      await requestApproval(ctx, exec, 'click_at', tier, `click at (${args.x}, ${args.y}) on a ${args.screenshotWidth}x${args.screenshotHeight} screenshot`)
+      await requestApproval(ctx, deps, exec, 'click_at', tier, `click at (${args.x}, ${args.y}) on a ${args.screenshotWidth}x${args.screenshotHeight} screenshot`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).clickAt({

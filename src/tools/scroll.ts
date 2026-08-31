@@ -53,7 +53,7 @@ export function registerScroll(ctx: Context, deps: ToolDeps): void {
       stepCounter.assert(sessionId, deps.config.maxSteps)
       deps.breaker.assertCanAct()
       const tier = await whitelistTier(ctx, deps, 'medium')
-      await requestApproval(ctx, exec, 'scroll', tier, `scroll ${args.direction} by ${args.amount} notches`)
+      await requestApproval(ctx, deps, exec, 'scroll', tier, `scroll ${args.direction} by ${args.amount} notches`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).scroll({

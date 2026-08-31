@@ -513,3 +513,71 @@ Node 侧 `package.json` 0.1.0→0.1.1；provider 的 MCP 客户端身份版本�
   `33a3bc1d6bcf83af9ec3b8171ae57ee62a0f96637010e3a8521b02db99fb377b`。
 - 对产物冒烟：版本 0.1.1、九工具面、监控启动日志出现
   `startup grace 500ms`、干净退出（exit 0）。
+
+## Phase 4.2 交付结论（审批接线真正生效，纯插件侧，2026-08-31）
+
+背景：第三轮真实环境验证确认回归 4（click_at 链路）被三层预存缺陷阻断，均非
+Phase 4 引入——
+
+1. Web UI 新会话默认 Full access，会话 `approval/policy=never`；
+2. 宿主 `user-approval` 的 `decide()` 在分发 `approval/request` waterfall
+   **之前**对 never 确定性拒绝（返回 `'rejected'`，源码见上游
+   `packages/interaction/user-approval/src/index.ts` 的 never 分支）；
+3. ask 下宿主交互式 answerer 排在插件 answerer 之前，轮不到插件
+   （第一轮 allowed-once 是真人点击的）。
+
+结论：`ctx.on('approval/request')` 上的 `registerAnswerer` 是死代码，
+无人值守下任何审批模式 click_at 都不通（never 秒拒、ask 等人）。修复必须
+纯插件侧，绕开宿主 waterfall。
+
+### P4.2-1：前置决策取代 waterfall 接线
+
+把 answerer 状态机从 waterfall 监听抽成可直接调用的
+`consultAnswerer(config, sessionId, tier) => 'auto' | 'delegate'`：
+复用原窗口/配额逻辑（`autoApprovalWindowMs` / `autoApprovalMaxGrants`），
+high 永远 `delegate`；配额耗尽后窗口内保持耗尽（不重置，防绕过上限）；
+窗口过期重新武装；`RiskTier` 移入 answerer.ts，shared.ts 转为再导出。
+`index.ts` 移除 `registerAnswerer` waterfall 接线（宿主结构上不会咨询到
+它，注册即死代码）。
+
+### P4.2-2：requestApproval 前置放行 + never 模式 fail-closed
+
+`shared.ts requestApproval`（签名新增 `deps`，四个工具调用点同步更新）：
+
+- `tier==='medium'` 且 `consultAnswerer` 返回 `'auto'` → 直接放行，不调
+  `ctx.approval.request`；Auditor 新增 `recordAutoApproval` 写审计行
+  `answer/auto-allowed`（timestamp/sessionId/toolName/tier），自动放行留痕。
+- 其余（high、medium 配额耗尽）→ 照旧走 `ctx.approval.request`：ask 会话由
+  宿主交互式审批；never 会话宿主确定性拒绝。`rejected` 与 `unavailable`
+  统一抛出带指引的清晰错误（需交互审批 + 实际 tier + never-approval/
+  Full access 成因 + 切 Workspace Write 重试），替代旧版误导性的
+  "was rejected by the user"；`cancelled` 保持独立错误。
+- 升级路径的 reason 仍带 `[dsh-computer-use tier=…]` 标记，宿主侧审批日志
+  （`approval/asked` + `approval/decided`）继续留痕。
+
+### P4.2-3：文档与描述对齐
+
+README：Purpose / Configuration 注释 / Key facts 增补审批语义（前置决策、
+`answer/auto-allowed` 审计行、Full access 下 high fail-closed 属设计使然）；
+Known Limitations 移除已被本修复消灭的"waterfall 注册顺序可被远端审批桥
+遮蔽"，新增 never 会话限制；审计清单补入自动放行行；Model Experience 同步。
+hotkey 工具描述改为 "always require interactive confirmation and are refused
+outright in never-approval sessions"（与 fail-closed 行为一致）。
+
+### P4.2-4：只记录（D5）
+
+pause-on-user-input 把 agent 带外自动化（模型不经 computer-use 工具、自调
+PowerShell UIAutomation 之类驱动 UI）产生的真实 OS 输入误判为用户接管，
+触发 `paused(user-input)`。检测面在 OS 输入事件层，原理上无法区分输入来源；
+README Known Limitations 已补明该情形。本轮不修。
+
+### P4.2-5：验证结果
+
+- `npx tsc --noEmit` 零错误；`vitest run` 122/122（净增 7：旧
+  registerAnswerer 瀑布测试 6 个改写为 consultAnswerer 5 个，新增
+  requestApproval 7 个、auditor recordAutoApproval 1 个）。
+- 覆盖率（definition/security/vision 分母）：语句 92.41%、行 93.4%、
+  分支 80.76%，均 >80%。
+- 真实环境验证（待执行）：重启后无人值守 Full access 会话提交截图 +
+  click_at 计算器 3+5= 任务，预期审计出现 click_at action/before+after、
+  无 rejected；再提交 high 操作（hotkey win+r），预期 never 模式清晰错误。

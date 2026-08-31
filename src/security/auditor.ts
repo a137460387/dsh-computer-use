@@ -11,6 +11,7 @@
 import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type { RiskTier } from '../answerer.ts'
 import type { ComputerUseConfig } from '../config.ts'
 import type { AfterActionEvent, BeforeActionEvent } from '../definition/index.ts'
 
@@ -34,6 +35,16 @@ export interface SensitiveWindowAuditRecord {
   readonly windowTitle: string
   /** The configured pattern source that fired. */
   readonly pattern: string
+}
+
+/** Extra audit facts for one pre-dispatch auto-approval grant. */
+export interface AutoApprovalAuditRecord {
+  /** Session whose action auto-granted. */
+  readonly sessionId: string
+  /** The tool that auto-granted. */
+  readonly toolName: string
+  /** Risk tier of the auto-granted action. */
+  readonly tier: RiskTier
 }
 
 /** Why desktop control paused or resumed. */
@@ -69,6 +80,11 @@ export interface Auditor {
   recordDanger(record: DangerAuditRecord): void
   /** Log one sensitive-window capture refusal as a high-risk event. */
   recordSensitiveWindow(record: SensitiveWindowAuditRecord): void
+  /**
+   * Log one pre-dispatch auto-approval grant; escalated requests need no
+   * plugin line because the ApprovalService logs its own session events.
+   */
+  recordAutoApproval(record: AutoApprovalAuditRecord): void
   /** Log one lifecycle transition (mount, sidecar lifetime, pause/resume). */
   recordLifecycle(event: LifecycleEvent): void
   /** Run one retention sweep now; resolves when the pruning hits disk. */
@@ -192,6 +208,15 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         ...record.sessionId !== undefined ? { sessionId: record.sessionId } : {},
         windowTitle: record.windowTitle,
         pattern: record.pattern,
+      })
+    },
+    recordAutoApproval(record: AutoApprovalAuditRecord): void {
+      log.append({
+        kind: 'answer/auto-allowed',
+        timestamp: new Date().toISOString(),
+        sessionId: record.sessionId,
+        toolName: record.toolName,
+        tier: record.tier,
       })
     },
     recordLifecycle(event: LifecycleEvent): void {
