@@ -61,6 +61,17 @@ export interface ScreenShotOptions {
   readonly quality?: number
   /** Crop window in full-screen screenshot pixel coordinates. */
   readonly region?: DisplayBounds
+  /**
+   * Draw a synthetic cursor overlay at this point of the encoded image
+   * (screenshot pixel space) without moving the real OS pointer; used for
+   * click-intent previews.
+   */
+  readonly cursorPosition?: { readonly x: number; readonly y: number }
+  /**
+   * Filename suffix for the archived frame, e.g. `-preview`; the sidecar
+   * validates the character set at the wire boundary.
+   */
+  readonly archiveSuffix?: string
 }
 
 /** One captured screenshot observation. */
@@ -82,6 +93,11 @@ export interface ScreenShot {
   readonly dhash: string
   /** Capture timestamp, milliseconds since the Unix epoch. */
   readonly capturedAtMs: number
+  /**
+   * The point where a synthetic cursor overlay was drawn into this frame,
+   * absent for plain captures.
+   */
+  readonly cursorOverlay?: { readonly x: number; readonly y: number }
 }
 
 /** Outcome of one executed input action. */

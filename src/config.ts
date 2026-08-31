@@ -42,6 +42,11 @@ export interface ComputerUseConfig {
   readonly screenshotMaxWidth: number
   /** JPEG quality (1-100) for screenshot compression. */
   readonly screenshotQuality: number
+  /**
+   * Archive a pre-click preview frame — a capture with a synthetic cursor
+   * marking the intended point — before every physical click.
+   */
+  readonly clickPreview: boolean
   /** Freshness window in milliseconds for a `basedOnObservationId` reference. */
   readonly observationTtlMs: number
   /** Consecutive no-screen-change actions that trip the breaker. */
@@ -123,6 +128,7 @@ export const Config: z<ComputerUseConfig> = z.object({
   stepDelayMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(1500),
   screenshotMaxWidth: z.number().step(1).min(256).default(1280),
   screenshotQuality: z.number().step(1).min(1).max(100).default(75),
+  clickPreview: z.boolean().default(true),
   observationTtlMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
   consecutiveFailureCount: z.number().step(1).min(1).default(3),
   similarityThreshold: z.number().step(1).min(0).default(5),

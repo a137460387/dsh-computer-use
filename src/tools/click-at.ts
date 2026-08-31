@@ -60,6 +60,23 @@ export function registerClickAt(ctx: Context, deps: ToolDeps): void {
       await requestApproval(ctx, deps, exec, 'click_at', tier, `click at (${args.x}, ${args.y}) on a ${args.screenshotWidth}x${args.screenshotHeight} screenshot`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
+      if (deps.config.clickPreview) {
+        // Intent frame: archive the current screen with a synthetic cursor on
+        // the click point, so the audit trail holds both the intended point
+        // and (after the click) its result. Best-effort on purpose — the
+        // capture's own guards (sensitive windows, pause) already ran, and a
+        // failed preview must never block an approved click.
+        try {
+          await computerUse(ctx).screenShot({
+            maxWidth: deps.config.screenshotMaxWidth,
+            quality: deps.config.screenshotQuality,
+            cursorPosition: { x: args.x, y: args.y },
+            archiveSuffix: '-preview',
+          })
+        } catch (error) {
+          ctx.logger.warn(`dsh-computer-use: pre-click preview failed (${String(error)}); clicking without it`)
+        }
+      }
       const result = await computerUse(ctx).clickAt({
         x: args.x,
         y: args.y,

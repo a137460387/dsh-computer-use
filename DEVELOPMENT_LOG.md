@@ -581,3 +581,92 @@ README Known Limitations 已补明该情形。本轮不修。
 - 真实环境验证（待执行）：重启后无人值守 Full access 会话提交截图 +
   click_at 计算器 3+5= 任务，预期审计出现 click_at action/before+after、
   无 rejected；再提交 high 操作（hotkey win+r），预期 never 模式清晰错误。
+
+## Phase 5 交付结论（真实环境验证 A–D 执行，2026-08-31）
+
+### P5-1：各步结果（原始证据见会话报告）
+
+- A：`dsh plugin --profile web add` → `Already up to date / Done in 566ms
+  using pnpm v10.32.1`；profile `package.json` bundles 序 base → web-app →
+  dsh-computer-use；`@modelcontextprotocol/sdk@1.30.0` 经 link 插件自身
+  node_modules 解析。
+- B：`--dump-config` 495-504 行：`# == dsh-computer-use, patched by
+  …\profiles\web\cordis.patch.yml`，`name: dsh-computer-use`，六个 config
+  键齐（B+ 块本轮前已在 patch 中，层叠生效确认）。
+- C：前台终端 Ctrl+C + 重启；teardown 审计 `lifecycle/sidecar-exited
+  trigger=shutdown`、两个旧 sidecar 随宿主退出；重启后审计新增
+  `lifecycle/mounted`（win32，visionRoute tokenrhythm/qwen3.8-max，
+  changeDetectionRoute tokenrhythm/glm-5.3-flash）。
+- D：新会话「请截个图，然后打开 Windows 计算器」：审计
+  `sidecar-starting (mode=prod, prod binary …exe)` →
+  `sidecar-connected v0.1.1` → screen_shot before/after ×2；模型以
+  Start-Process 开计算器（未点击，模型行为）。追加会话诱导 click_at：
+  我的合成输入按设计触发 `paused(user-input)` → 模型调 resume_actions
+  （`resumed reason=manual`）→ 5× click_at 全部 `answer/auto-allowed
+  (tier=medium)` + action/before+after success → 计算器屏 `3 + 5 =` 得 8，
+  Web UI 同报 8。Full access 下 medium 前置放行、无审批弹窗、留痕完整。
+
+### P5-2：与提示词预期不符项（只记录，未擅自修）
+
+1. **终端不显示 mounted / starting sidecar / sidecar connected 行**。根因
+   核实：web profile 未挂 console exporter，`ctx.logger.info` 默认只入
+   cordis 内存 ring buffer（上游 `vendor/cordis/src/logger.ts:195,213-221`；
+   base/web-app patch 无 logger 行；终端横幅是 webserver 的 raw
+   console.log）。插件走宿主正规日志 API 且审计 lifecycle 行双写，行为
+   正确；终端可见性属宿主侧配置选择（profile patch 挂
+   `@deepseek-ai/cordis-plugin-logger-console` 即可见），待用户裁决。
+2. **版本文字**：预期 v0.1.0、实测 v0.1.1 —— 预期文字早于 Phase 4.1
+   版本对齐（D3），非缺陷。
+3. 首条消息未产生点击（模型选 shell）——模型行为，追加消息补齐点击验证。
+
+### P5-3：结论
+
+本轮未发现新的插件侧缺陷；无代码改动、无提交。high 级 never 模式清晰
+错误一项本轮未演练（避免高危操作真实作用于桌面），留待用户决定。
+
+## Phase 6 交付结论（合成光标叠加，2026-08-31）
+
+### P6-1：动机与范围
+
+第二轮验证的核心痛点：`click_at` 只留下点击后的结果，用户看不到 agent
+"打算点哪里"。本轮新增合成光标叠加（synthetic cursor overlay）：在截图上
+绘制半透明青色箭头（`#00E5FF`、黑描边）标记意图坐标，真实 OS 光标不动。
+交付面：
+
+- `src-python/core/cursor_overlay.py`：`draw_cursor_overlay(image, x, y, *,
+  scale, color, outline, label)`，经典箭头多边形（热点=尖端=坐标点），
+  alpha=190 半透明填充，坐标标签带半透明背景框；光标尺寸按截图宽度相对
+  `REFERENCE_WIDTH=1280` 自动放大（物理 2560 截图得 2x 光标）。
+- sidecar `screen_shot` 新增 `cursorPosition`（截图坐标系，与 click_at 同
+  basis）与 `archiveSuffix`（wire 边界校验 `[A-Za-z0-9_-]{1,16}`，防路径
+ 逃逸）；叠加发生在 max_width 缩放之后，dHash 与归档字节描述带光标的帧。
+- Node 新工具 `peek_cursor`（low risk，无审批）：带光标捕获新帧并注册为
+  新 observation，供 click_at 引用；不喂 breaker / change detector，保持
+  agent 观察循环以普通截图为 basis；basis 过期或声明尺寸与 observation
+  不符时清晰拒绝。
+- `click_at` 在审批通过、物理点击前 best-effort 捕获 `-preview` 意图帧
+  （`clickPreview` config 开关，默认 true）；预览失败只 warn 不阻断已批准
+  的点击。
+- 版本三同步点升 0.1.2（package.json / PLUGIN_VERSION / main.py VERSION）。
+
+### P6-2：设计取舍（只记录）
+
+1. wire 命名用 camelCase `cursorPosition` 而非任务书 snake_case
+   `cursor_position`，与既有 `maxWidth`/`basedOnObservationId` 约定一致。
+2. 预览帧注册为 observation：无害（TTL 自清理），且 before/after-action
+   审计事件天然携带意图帧。
+3. peek 不做坐标重映射：捕获管线确定性（同 maxWidth 同尺寸），返回帧即
+   新 basis；尺寸不符由 basis mismatch 校验兜底。
+
+### P6-3：验证
+
+- Python：`python -m unittest discover -s tests/python` 47/47（新增
+  cursor overlay 16：几何、alpha 混合、描边、自动缩放、标签翻转、越界
+  裁剪、非法颜色/scale、1280x720 绘制 <50ms）。
+- Node：`vitest run` 128/128（新增 cursor_overlay.spec.ts 6：参数透传、
+  basis 拒绝、`-preview` 顺序、预览失败不阻断、开关关闭跳过）；
+  `npx tsc --noEmit` 零错误。
+- `tests/dev-mcp-smoke.py` 增加 id 13/14：overlay facts + `-preview.jpg`
+  归档存在、非法 suffix 拒绝。
+- 样张目检：1280x720 与 2560x1440 渐变背景，箭头形状/描边/标签正确，
+  scale=2 等比放大。

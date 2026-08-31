@@ -51,8 +51,17 @@ def capture_screenshot(
     max_width: int | None,
     quality: int,
     region: tuple[int, int, int, int] | None,
+    cursor_position: tuple[int, int] | None = None,
+    archive_suffix: str = "",
 ) -> dict:
-    """Capture, compress, archive, and register one observation."""
+    """Capture, compress, archive, and register one observation.
+
+    cursor_position draws a synthetic cursor overlay into the final
+    (post-resize) image pixel space before encoding — the archived bytes and
+    the reported dHash describe the frame WITH the overlay. archive_suffix is
+    appended to the archived filename (e.g. "-preview" for click intent
+    frames); the caller validates its character set at the wire boundary.
+    """
     import pyautogui
 
     _prune_expired(ttl_ms)
@@ -67,6 +76,13 @@ def capture_screenshot(
         ratio = max_width / image.width
         image = image.resize((max_width, round(image.height * ratio)), Image.LANCZOS)
 
+    # Overlay after the resize: cursor_position is expressed in the encoded
+    # image's pixel space, the same basis the caller received the point in.
+    if cursor_position is not None:
+        from core.cursor_overlay import draw_cursor_overlay
+
+        image = draw_cursor_overlay(image, cursor_position[0], cursor_position[1])
+
     buffer = io.BytesIO()
     # JPEG has no alpha; drop it before encoding or Pillow errors.
     (image.convert("RGB") if image.mode in ("RGBA", "P", "LA") else image).save(
@@ -75,7 +91,7 @@ def capture_screenshot(
     data = buffer.getvalue()
 
     observation_id = uuid.uuid4().hex
-    path = os.path.join(archive_dir, f"{observation_id}.jpg")
+    path = os.path.join(archive_dir, f"{observation_id}{archive_suffix}.jpg")
     os.makedirs(archive_dir, exist_ok=True)
     with open(path, "wb") as handle:
         handle.write(data)
@@ -88,7 +104,7 @@ def capture_screenshot(
         "dhash": dhash(image),
     }
     _OBSERVATIONS[observation_id] = facts
-    return {
+    result = {
         "observationId": observation_id,
         "path": path,
         "width": image.width,
@@ -97,6 +113,9 @@ def capture_screenshot(
         "dhash": facts["dhash"],
         "capturedAtMs": facts["capturedAtMs"],
     }
+    if cursor_position is not None:
+        result["cursorOverlay"] = {"x": cursor_position[0], "y": cursor_position[1]}
+    return result
 
 
 def check_observation(observation_id: str, ttl_ms: int) -> dict:

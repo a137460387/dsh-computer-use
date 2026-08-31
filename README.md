@@ -6,12 +6,13 @@ Desktop-level **Computer Use** (vision control) bundle for [DeepSeek Harness](ht
 
 This plugin gives a DSH agent desktop control for targets that browser/DOM tools cannot reach (native applications, the OS shell of a window, anything rendered only as pixels). One host-plane bundle row provides:
 
-- **Seven model-facing tools** — `screen_shot`, `get_display_info`, `click_at`, `type_text`, `scroll`, `hotkey`, `resume_actions`.
+- **Eight model-facing tools** — `screen_shot`, `peek_cursor`, `get_display_info`, `click_at`, `type_text`, `scroll`, `hotkey`, `resume_actions`.
 - **A Python MCP sidecar** (`dsh-cu-server`) spawned through `ctx.subprocess`, speaking standard MCP JSON-RPC 2.0 over stdio. The sidecar owns all coordinate mathematics: the model emits pixels in *screenshot space*, and the sidecar maps them per-display with DPI awareness (Per-Monitor V2 on Windows, backing scale on macOS).
 - **Vision analysis through `ctx.llm`** on deployment-configured routes — screenshots persist through `ctx.attachments` as durable image blocks; the plugin never manages API keys or raw HTTP calls.
 - **A woven security layer** — tiered approval (medium-risk actions auto-approve pre-dispatch within a session window/quota, audited; high-risk always needs interactive confirmation), a danger-pattern filter on typed text, an ObservationId freshness gate, a no-change circuit breaker, per-session step ceilings, a window whitelist, and an append-only audit log with retention sweeps.
 - **User takeover detection** — a takeover hotkey (default `ctrl+alt+u`) and any user mouse/keyboard activity pause the four action tools until resumed; the pause state is audited and survives sidecar restarts.
 - **Sensitive-window capture refusal** — screenshots are refused before any pixel is captured when the foreground window title matches a deployment blocklist (password managers, online banking, ...); nothing is archived, persisted, or sent to a model.
+- **Synthetic cursor overlay** — `peek_cursor` previews where a click will land by drawing a translucent cyan arrow (never the real OS pointer) into a fresh capture, and every `click_at` archives a `-preview` intent frame before the physical click, so the audit trail holds both the intended point and its outcome.
 
 ## Installation
 
@@ -129,13 +130,14 @@ Key facts:
 
 ### What the model sees
 
-Seven host-plane tools, visible to every session of the profile the bundle is installed into:
+Eight host-plane tools, visible to every session of the profile the bundle is installed into:
 
 | Tool | Risk | What it returns |
 |---|---|---|
 | `screen_shot` | low (no approval) | The screenshot as an image block plus `observationId`, dimensions, and whether the screen changed since the previous capture; refused outright when the foreground window matches a sensitive pattern |
+| `peek_cursor` | low (no approval) | A fresh capture with a synthetic cursor drawn at the intended click point (the real OS cursor never moves) plus its own `observationId` for the click that follows |
 | `get_display_info` | low (no approval) | Per-display bounds, DPI scale factor, primary flag |
-| `click_at` | medium | Success + duration; coordinates stay in screenshot space, the sidecar maps them |
+| `click_at` | medium | Success + duration; coordinates stay in screenshot space, the sidecar maps them; archives a `-preview` frame with the synthetic cursor before the physical click |
 | `type_text` | medium | Success + char count; danger payloads are blocked before approval |
 | `scroll` | medium | Success + duration |
 | `hotkey` | medium; system shortcuts and the takeover combo escalate to high | Success + duration |

@@ -62,7 +62,7 @@ const COMPATIBLE_SERVER_PREFIX = '0.1.'
  * Sync point: keep aligned with package.json `version` and
  * src-python/main.py `VERSION` (one release moves all three).
  */
-const PLUGIN_VERSION = '0.1.1'
+const PLUGIN_VERSION = '0.1.2'
 
 /** Diagnostic tail retained from sidecar stderr. */
 const STDERR_DIAGNOSTIC_BYTES = 65_536
@@ -237,6 +237,8 @@ interface SidecarScreenShotResult {
   bytes: number
   dhash: string
   capturedAtMs: number
+  /** Present exactly when the capture drew a synthetic cursor overlay. */
+  cursorOverlay?: { x: number; y: number }
 }
 
 /**
@@ -612,6 +614,8 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       if (options?.maxWidth !== undefined) args.maxWidth = options.maxWidth
       if (options?.quality !== undefined) args.quality = options.quality
       if (options?.region !== undefined) args.region = options.region
+      if (options?.cursorPosition !== undefined) args.cursorPosition = options.cursorPosition
+      if (options?.archiveSuffix !== undefined) args.archiveSuffix = options.archiveSuffix
       const facts = await this.callSidecar<SidecarScreenShotResult>('screen_shot', args)
       const data = new Uint8Array(await readFile(facts.path))
       this.registerObservation(facts, data)
@@ -630,6 +634,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
         height: facts.height,
         dhash: facts.dhash,
         capturedAtMs: facts.capturedAtMs,
+        ...facts.cursorOverlay !== undefined ? { cursorOverlay: facts.cursorOverlay } : {},
       }
     })
   }

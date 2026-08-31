@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
 
 # Sync point: keep aligned with the Node side's package.json "version" and
 # the MCP client identity version in src/provider-mcp/index.ts.
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 SERVER_NAME = "dsh-cu-server"
 
 # Protocol versions this server negotiates; the client's is echoed when known.
@@ -100,7 +101,8 @@ _TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "screen_shot",
-        "description": "Capture a JPEG screenshot observation; returns path, dimensions, dHash, and the ObservationId.",
+        "description": "Capture a JPEG screenshot observation; returns path, dimensions, dHash, and the ObservationId."
+        " Optionally draws a synthetic cursor overlay marking an intended point (the real OS cursor never moves).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -116,6 +118,20 @@ _TOOL_SCHEMAS: list[dict] = [
                     },
                     "required": ["x", "y", "width", "height"],
                     "additionalProperties": False,
+                },
+                "cursorPosition": {
+                    "type": "object",
+                    "description": "Draw a synthetic cursor at this point of the encoded image (screenshot pixel space).",
+                    "properties": {
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                    },
+                    "required": ["x", "y"],
+                    "additionalProperties": False,
+                },
+                "archiveSuffix": {
+                    "type": "string",
+                    "description": "Filename suffix for the archived frame, e.g. '-preview' (letters, digits, '-', '_').",
                 },
             },
             "additionalProperties": False,
@@ -221,12 +237,20 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
 
                 raise SensitiveWindowError(title, blocked)
         region = arguments.get("region")
+        cursor = arguments.get("cursorPosition")
+        suffix = str(arguments.get("archiveSuffix", ""))
+        if suffix and re.fullmatch(r"[A-Za-z0-9_-]{1,16}", suffix) is None:
+            raise ValueError(
+                f"archiveSuffix {suffix!r} is invalid: 1-16 chars from [A-Za-z0-9_-]"
+            )
         return screen.capture_screenshot(
             archive_dir=config["archive_dir"],
             ttl_ms=config["ttl_ms"],
             max_width=arguments.get("maxWidth"),
             quality=int(arguments.get("quality", 75)),
             region=None if region is None else (region["x"], region["y"], region["width"], region["height"]),
+            cursor_position=None if cursor is None else (int(cursor["x"]), int(cursor["y"])),
+            archive_suffix=suffix,
         )
 
     if name == "resume_actions":

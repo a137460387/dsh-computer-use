@@ -166,8 +166,29 @@ def main() -> int:
     check("click_at (center)", click_content.get("success") is True, click)
     print(f"     physical=({click_content.get('physicalX')}, {click_content.get('physicalY')}) display={click_content.get('displayId')}")
 
-    send({"jsonrpc": "2.0", "id": 12, "method": "ping"})
-    ping = recv(12)
+    # Synthetic cursor overlay: screen_shot with cursorPosition archives a
+    # preview frame whose facts report the overlay point and the -preview
+    # filename suffix; a malformed suffix fails loud at the wire boundary.
+    send({"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "screen_shot", "arguments": {
+        "maxWidth": 1280, "quality": 75,
+        "cursorPosition": {"x": width // 2, "y": height // 2},
+        "archiveSuffix": "-preview",
+    }}})
+    preview = recv(13)
+    preview_content = preview.get("result", {}).get("structuredContent", {})
+    check("screen_shot cursor overlay", preview_content.get("cursorOverlay") == {"x": width // 2, "y": height // 2}, preview)
+    preview_path = Path(preview_content.get("path", ""))
+    check("preview archive suffix", preview_path.name.endswith("-preview.jpg") and preview_path.is_file(), preview_path)
+    print(f"     overlay at ({width // 2}, {height // 2}) -> {preview_path}")
+
+    send({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "screen_shot", "arguments": {
+        "archiveSuffix": "../escape",
+    }}})
+    bad_suffix = recv(14)
+    check("invalid archiveSuffix refused", bad_suffix.get("result", {}).get("isError") is True, bad_suffix)
+
+    send({"jsonrpc": "2.0", "id": 15, "method": "ping"})
+    ping = recv(15)
     check("ping", ping.get("result") == {}, ping)
 
     proc.stdin.close()  # type: ignore[union-attr]

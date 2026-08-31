@@ -19,6 +19,7 @@ import { SensitiveWindowPolicy } from './src/security/sensitive-window.ts'
 import { registerClickAt } from './src/tools/click-at.ts'
 import { registerGetDisplayInfo } from './src/tools/get-display-info.ts'
 import { registerHotkey } from './src/tools/hotkey.ts'
+import { registerPeekCursor } from './src/tools/peek-cursor.ts'
 import { registerResumeActions } from './src/tools/resume-actions.ts'
 import { registerScreenShot } from './src/tools/screen-shot.ts'
 import type { ToolDeps } from './src/tools/shared.ts'
@@ -85,7 +86,7 @@ function routesMissingError(missing: readonly string[]): Error {
 
 /**
  * Mount the computer-use capability: security layer, vision bridge, the
- * MCP-backed service provider, and the seven model-facing tools. Approval
+ * MCP-backed service provider, and the eight model-facing tools. Approval
  * decisions ride the tools' shared gate: medium risk may auto-grant
  * pre-dispatch (audited), everything else traverses the host approval seam.
  * The sidecar itself starts lazily at first service use, so mounting stays
@@ -125,6 +126,7 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
   new McpComputerUseProvider(ctx, config, auditor)
 
   registerScreenShot(ctx, deps)
+  registerPeekCursor(ctx, deps)
   registerGetDisplayInfo(ctx, deps)
   registerClickAt(ctx, deps)
   registerTypeText(ctx, deps)
