@@ -119,6 +119,72 @@ describe('createAuditor', () => {
     expect(lines[1]).toMatchObject({ toolName: 'click_at', tier: 'medium', outcome: 'cancelled' })
   })
 
+  it('records the confirm wait lifecycle with trigger facts but never the payload', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordConfirmRequested({
+      sessionId: 'sess-1', toolName: 'type_text', source: 'danger-pattern',
+      pattern: '\\bsudo\\b', textBytes: 12,
+    })
+    auditor.recordConfirmGranted({
+      sessionId: 'sess-1', toolName: 'type_text', source: 'danger-pattern',
+      waitMs: 4200, dangerTokenArmed: true,
+    })
+
+    const lines = await waitForLines(config.auditLogPath, 2)
+    expect(lines[0]).toMatchObject({
+      kind: 'confirm/requested', severity: 'high', sessionId: 'sess-1',
+      toolName: 'type_text', source: 'danger-pattern', pattern: '\\bsudo\\b', textBytes: 12,
+    })
+    expect(lines[1]).toMatchObject({
+      kind: 'confirm/granted', severity: 'high', sessionId: 'sess-1',
+      toolName: 'type_text', source: 'danger-pattern', waitMs: 4200, dangerTokenArmed: true,
+    })
+  })
+
+  it('records a hotkey-triggered confirm request without the type_text facts', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordConfirmRequested({
+      sessionId: 'sess-1', toolName: 'hotkey', source: 'hotkey-list', hotkey: 'delete+shift',
+    })
+
+    const lines = await waitForLines(config.auditLogPath, 1)
+    expect(lines[0]).toMatchObject({
+      kind: 'confirm/requested', toolName: 'hotkey', source: 'hotkey-list', hotkey: 'delete+shift',
+    })
+    expect(Object.keys(lines[0] ?? {}).sort()).toEqual([
+      'hotkey', 'kind', 'sessionId', 'severity', 'source', 'timestamp', 'toolName',
+    ])
+  })
+
+  it('records every confirm denial with its closure reason and wait', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordConfirmDenied({
+      sessionId: 'sess-1', toolName: 'hotkey', source: 'hotkey-list', hotkey: 'delete+shift',
+      reason: 'timeout', waitMs: 28_800_000,
+    })
+    auditor.recordConfirmDenied({
+      sessionId: 'sess-2', toolName: 'type_text', source: 'danger-pattern',
+      pattern: '\\bsudo\\b', textBytes: 5, reason: 'self-rescue', waitMs: 900,
+    })
+
+    const lines = await waitForLines(config.auditLogPath, 2)
+    expect(lines[0]).toMatchObject({
+      kind: 'confirm/denied', severity: 'high', reason: 'timeout', waitMs: 28_800_000, hotkey: 'delete+shift',
+    })
+    expect(lines[1]).toMatchObject({
+      kind: 'confirm/denied', reason: 'self-rescue', waitMs: 900, pattern: '\\bsudo\\b', textBytes: 5,
+    })
+  })
+
   it('records a freshness-gate refusal, naming the action and the stale reference', async () => {
     const ctx = new Context()
     const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
@@ -153,8 +219,9 @@ describe('createAuditor', () => {
     auditor.recordLifecycle({ event: 'sidecar-exited', exitCode: 0, signal: null, trigger: 'shutdown' })
     auditor.recordLifecycle({ event: 'paused', reason: 'hotkey' })
     auditor.recordLifecycle({ event: 'resumed', reason: 'user-input' })
+    auditor.recordLifecycle({ event: 'paused', reason: 'confirm' })
 
-    const lines = await waitForLines(config.auditLogPath, 7)
+    const lines = await waitForLines(config.auditLogPath, 8)
     expect(lines.map(line => line.kind)).toEqual([
       'lifecycle/mounted',
       'lifecycle/routes-missing',
@@ -163,12 +230,15 @@ describe('createAuditor', () => {
       'lifecycle/sidecar-exited',
       'lifecycle/paused',
       'lifecycle/resumed',
+      'lifecycle/paused',
     ])
     expect(lines[0]).toMatchObject({ platform: 'win32', visionRoutesConfigured: true, visionRoute: 'vp/vm' })
     expect(lines[1]).toMatchObject({ missing: ['visionModel'] })
     expect(lines[4]).toMatchObject({ exitCode: 0, signal: null, trigger: 'shutdown' })
     expect(lines[5]).toMatchObject({ reason: 'hotkey' })
     expect(lines[6]).toMatchObject({ reason: 'user-input' })
+    // The confirm gate's pause reason pairs with the confirm/* lines.
+    expect(lines[7]).toMatchObject({ reason: 'confirm' })
   })
 
   it('serializes concurrent appends into one line per event', async () => {

@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../../src/answerer.ts'
-import { StepCounter, isHighRiskHotkey, isSameHotkey, maybeVerifyAction, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
+import { StepCounter, isHighRiskHotkey, isIrreversibleHotkey, isSameHotkey, maybeVerifyAction, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
 import { testConfig } from '../helpers.ts'
 
 describe('normalizeHotkey', () => {
@@ -15,6 +15,12 @@ describe('normalizeHotkey', () => {
   it('is independent of the emitted key order', () => {
     expect(normalizeHotkey(['ctrl', 'shift', 'esc']))
       .toBe(normalizeHotkey(['esc', 'ctrl', 'shift']))
+  })
+
+  it('does not fold key aliases — alias folding is scoped to the irreversible list', () => {
+    // The shared normalizer feeds HIGH_RISK_HOTKEYS and the takeover-combo
+    // comparison too; those keep their canonical-only matching.
+    expect(normalizeHotkey(['shift', 'del'])).toBe('del+shift')
   })
 })
 
@@ -42,6 +48,34 @@ describe('isHighRiskHotkey', () => {
   it('does not escalate a superset of a system shortcut', () => {
     // win+r is high risk, but win+r+extra is a different combination.
     expect(isHighRiskHotkey(['win', 'r', 'shift'])).toBe(false)
+  })
+})
+
+describe('isIrreversibleHotkey', () => {
+  it('flags permanent deletion regardless of key order or case', () => {
+    expect(isIrreversibleHotkey(['shift', 'delete'])).toBe(true)
+    expect(isIrreversibleHotkey(['delete', 'shift'])).toBe(true)
+    expect(isIrreversibleHotkey(['Delete', 'SHIFT'])).toBe(true)
+  })
+
+  it('folds the del alias into delete so neither spelling bypasses the gate', () => {
+    // pyautogui presses the same physical key for both spellings; the list
+    // matching treats them as the identical irreversible combo.
+    expect(isIrreversibleHotkey(['shift', 'del'])).toBe(true)
+    expect(isIrreversibleHotkey(['del', 'shift'])).toBe(true)
+    expect(isIrreversibleHotkey(['DEL', 'Shift'])).toBe(true)
+  })
+
+  it('stays parallel to the high-risk list: alt+f4 is NOT irreversible', () => {
+    // alt+f4 keeps its high-risk / never-approval refusal semantics; the
+    // irreversible gate must not absorb it.
+    expect(isIrreversibleHotkey(['alt', 'f4'])).toBe(false)
+    expect(isHighRiskHotkey(['alt', 'f4'])).toBe(true)
+    expect(isIrreversibleHotkey(['shift', 'delete', 'ctrl'])).toBe(false)
+    expect(isIrreversibleHotkey(['shift', 'del', 'ctrl'])).toBe(false)
+    expect(isIrreversibleHotkey(['delete'])).toBe(false)
+    expect(isIrreversibleHotkey(['del'])).toBe(false)
+    expect(isIrreversibleHotkey([])).toBe(false)
   })
 })
 

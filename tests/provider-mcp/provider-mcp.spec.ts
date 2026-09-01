@@ -3,12 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import { ObservationId } from '../../src/definition/index.ts'
+import type { PauseTransitionEvent } from '../../src/definition/index.ts'
 import McpComputerUseProvider, {
   REQUIRED_SIDECAR_TOOLS,
   computerUseBinaryPath,
   resolveSidecarLaunch,
 } from '../../src/provider-mcp/index.ts'
-import type { ActionRefusalAuditRecord } from '../../src/security/auditor.ts'
+import type { ActionRefusalAuditRecord, LifecycleEvent } from '../../src/security/auditor.ts'
 import { noOpAuditor, testConfig } from '../helpers.ts'
 
 // existsSync is mocked module-wide so the missing-binary refusal is testable
@@ -179,11 +180,11 @@ describe('McpComputerUseProvider refusal audit', () => {
 })
 
 describe('McpComputerUseProvider readiness facts', () => {
-  it('names the nine-tool sidecar surface the handshake must prove', () => {
-    expect(REQUIRED_SIDECAR_TOOLS).toHaveLength(9)
+  it('names the ten-tool sidecar surface the handshake must prove', () => {
+    expect(REQUIRED_SIDECAR_TOOLS).toHaveLength(10)
     expect([...REQUIRED_SIDECAR_TOOLS]).toEqual(expect.arrayContaining([
       'get_display_info', 'screen_shot', 'click_at', 'type_text', 'scroll',
-      'hotkey', 'get_foreground_window', 'resume_actions', 'pause_actions',
+      'hotkey', 'get_foreground_window', 'resume_actions', 'pause_actions', 'arm_danger_token',
     ]))
   })
 
@@ -194,7 +195,7 @@ describe('McpComputerUseProvider readiness facts', () => {
       connected: false,
       startedOnce: false,
       disposed: false,
-      requiredToolSurfaceSize: 9,
+      requiredToolSurfaceSize: 10,
       paused: false,
       healthCheckActive: false,
     })
@@ -210,8 +211,8 @@ describe('McpComputerUseProvider readiness facts', () => {
       healthTimer: NodeJS.Timeout | undefined
     }
     internal.client = {} // any client marks the connection live for diagnostics
-    internal.serverVersion = '0.1.3'
-    internal.connectedToolCount = 9
+    internal.serverVersion = '0.1.4'
+    internal.connectedToolCount = 10
     internal.healthTimer = setTimeout(() => {}, 1000)
 
     const facts = provider.readinessFacts()
@@ -219,11 +220,11 @@ describe('McpComputerUseProvider readiness facts', () => {
       connected: true,
       startedOnce: false,
       disposed: false,
-      requiredToolSurfaceSize: 9,
+      requiredToolSurfaceSize: 10,
       paused: false,
       healthCheckActive: true,
-      serverVersion: '0.1.3',
-      toolSurfaceSize: 9,
+      serverVersion: '0.1.4',
+      toolSurfaceSize: 10,
     })
     clearTimeout(internal.healthTimer)
   })
@@ -234,5 +235,66 @@ describe('McpComputerUseProvider readiness facts', () => {
     const internal = provider as unknown as { paused: boolean }
     internal.paused = true
     expect(provider.readinessFacts().paused).toBe(true)
+  })
+})
+
+describe('McpComputerUseProvider pause transitions', () => {
+  function transitionHarness() {
+    const ctx = new Context()
+    const lifecycle: LifecycleEvent[] = []
+    const provider = new McpComputerUseProvider(ctx, testConfig(), {
+      ...noOpAuditor(),
+      recordLifecycle: event => { lifecycle.push(event) },
+    })
+    const events: PauseTransitionEvent[] = []
+    ctx.on('computer-use/pause-transition', event => events.push(event))
+    const internal = provider as unknown as {
+      handleSidecarNotification(message: unknown): void
+      paused: boolean
+    }
+    return {
+      internal,
+      lifecycle,
+      events,
+      notify(params: Record<string, unknown>): void {
+        internal.handleSidecarNotification({ method: 'notifications/dsh-cu/pause-state', params })
+      },
+    }
+  }
+
+  it('mirrors the state, audits the confirm reason, and re-broadcasts the counter', () => {
+    const harness = transitionHarness()
+
+    harness.notify({ paused: true, reason: 'confirm', transitionSeq: 3 })
+    expect(harness.internal.paused).toBe(true)
+    expect(harness.lifecycle).toEqual([{ event: 'paused', reason: 'confirm' }])
+    expect(harness.events).toEqual([{ paused: true, reason: 'confirm', transitionSeq: 3 }])
+
+    harness.notify({ paused: false, reason: 'hotkey', transitionSeq: 4 })
+    expect(harness.internal.paused).toBe(false)
+    expect(harness.lifecycle).toEqual([
+      { event: 'paused', reason: 'confirm' },
+      { event: 'resumed', reason: 'hotkey' },
+    ])
+    expect(harness.events[1]).toEqual({ paused: false, reason: 'hotkey', transitionSeq: 4 })
+  })
+
+  it('coerces an unknown reason to manual and a malformed counter to the fail-closed -1', () => {
+    const harness = transitionHarness()
+
+    harness.notify({ paused: true, reason: 'alien', transitionSeq: 'many' })
+
+    expect(harness.lifecycle).toEqual([{ event: 'paused', reason: 'manual' }])
+    expect(harness.events).toEqual([{ paused: true, reason: 'manual', transitionSeq: -1 }])
+  })
+
+  it('keeps duplicate states silent', () => {
+    const harness = transitionHarness()
+
+    harness.notify({ paused: true, reason: 'confirm', transitionSeq: 1 })
+    harness.notify({ paused: true, reason: 'confirm', transitionSeq: 1 })
+
+    expect(harness.lifecycle).toHaveLength(1)
+    expect(harness.events).toHaveLength(1)
   })
 })

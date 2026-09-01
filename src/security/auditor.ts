@@ -2,8 +2,9 @@
  * Behavior audit: every action appends one JSON line to the deployment's
  * audit log (timestamp, session, action type, coordinates/detail, hashes,
  * outcome), high-risk danger blocks are logged separately, approval-seam and
- * freshness-gate refusals append their own lines, and a retention sweep
- * prunes log lines and archived screenshots older than the configured window.
+ * freshness-gate refusals append their own lines, confirm-gate waits append
+ * requested/granted/denied lines, and a retention sweep prunes log lines and
+ * archived screenshots older than the configured window.
  * A failed write never breaks the action flow; it announces itself once per
  * failure episode through the host logger. Screenshot ARCHIVE bytes and
  * breaker HASH fingerprints stay in separate stores by design.
@@ -62,6 +63,68 @@ export interface AnswerRefusalAuditRecord {
   readonly outcome: 'rejected' | 'unavailable' | 'cancelled'
 }
 
+/** Which trigger set demanded one physical confirmation. */
+export type ConfirmSource = 'hotkey-list' | 'danger-pattern'
+
+/** Why one confirm-gate wait closed without releasing the action. */
+export type ConfirmDenialReason =
+  | 'timeout'
+  | 'self-rescue'
+  | 'cancelled'
+  | 'busy'
+  | 'pause-failed'
+  | 'arm-failed'
+
+/** Extra audit facts for one confirm-gate wait that started. */
+export interface ConfirmRequestedAuditRecord {
+  /** Session whose tool call demanded the confirmation. */
+  readonly sessionId: string
+  /** The tool whose action demanded the confirmation. */
+  readonly toolName: 'hotkey' | 'type_text'
+  /** The trigger set that fired. */
+  readonly source: ConfirmSource
+  /** Normalized combo identity; present exactly for hotkey-list triggers. */
+  readonly hotkey?: string
+  /** Danger pattern source text; present exactly for danger-pattern triggers. */
+  readonly pattern?: string
+  /** Payload length in UTF-8 bytes (content itself stays out of the log). */
+  readonly textBytes?: number
+}
+
+/** Extra audit facts for one confirm-gate wait released by the hotkey press. */
+export interface ConfirmGrantedAuditRecord {
+  /** Session whose tool call was released. */
+  readonly sessionId: string
+  /** The tool whose action was released. */
+  readonly toolName: 'hotkey' | 'type_text'
+  /** The trigger set that fired. */
+  readonly source: ConfirmSource
+  /** Milliseconds between the wait starting and the physical confirm. */
+  readonly waitMs: number
+  /** Whether a single-use sidecar danger token was armed for the release. */
+  readonly dangerTokenArmed: boolean
+}
+
+/** Extra audit facts for one confirm-gate wait closed without a confirm. */
+export interface ConfirmDeniedAuditRecord {
+  /** Session whose tool call was closed. */
+  readonly sessionId: string
+  /** The tool whose action was closed. */
+  readonly toolName: 'hotkey' | 'type_text'
+  /** The trigger set that fired. */
+  readonly source: ConfirmSource
+  /** The closure reason. */
+  readonly reason: ConfirmDenialReason
+  /** Milliseconds spent waiting before the closure (0 for pre-wait refusals). */
+  readonly waitMs: number
+  /** Normalized combo identity; present exactly for hotkey-list triggers. */
+  readonly hotkey?: string
+  /** Danger pattern source text; present exactly for danger-pattern triggers. */
+  readonly pattern?: string
+  /** Payload length in UTF-8 bytes (content itself stays out of the log). */
+  readonly textBytes?: number
+}
+
 /** Extra audit facts for one action refused by the observation freshness gate. */
 export interface ActionRefusalAuditRecord {
   /** The action that was refused. */
@@ -114,7 +177,7 @@ export interface AuditWriteHealth {
 }
 
 /** Why desktop control paused or resumed. */
-export type PauseReason = 'hotkey' | 'user-input' | 'manual'
+export type PauseReason = 'hotkey' | 'user-input' | 'manual' | 'confirm'
 
 /** Who terminated the sidecar process. */
 export type SidecarExitTrigger = 'shutdown' | 'restart' | 'crash'
@@ -157,6 +220,12 @@ export interface Auditor {
    * seam dispatch and the tool-level cancellation.
    */
   recordAnswerRefusal(record: AnswerRefusalAuditRecord): void
+  /** Log one confirm-gate wait start (pause established, waiting for the hotkey). */
+  recordConfirmRequested(record: ConfirmRequestedAuditRecord): void
+  /** Log one confirm-gate release by the physical takeover hotkey. */
+  recordConfirmGranted(record: ConfirmGrantedAuditRecord): void
+  /** Log one confirm-gate closure without a confirm. */
+  recordConfirmDenied(record: ConfirmDeniedAuditRecord): void
   /** Log one action refused by the observation freshness gate. */
   recordActionRefusal(record: ActionRefusalAuditRecord): void
   /** Log one post-action semantic verification verdict (advisory channel). */
@@ -346,6 +415,46 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         toolName: record.toolName,
         tier: record.tier,
         outcome: record.outcome,
+      })
+    },
+    recordConfirmRequested(record: ConfirmRequestedAuditRecord): void {
+      log.append({
+        kind: 'confirm/requested',
+        severity: 'high',
+        timestamp: new Date().toISOString(),
+        sessionId: record.sessionId,
+        toolName: record.toolName,
+        source: record.source,
+        ...record.hotkey !== undefined ? { hotkey: record.hotkey } : {},
+        ...record.pattern !== undefined ? { pattern: record.pattern } : {},
+        ...record.textBytes !== undefined ? { textBytes: record.textBytes } : {},
+      })
+    },
+    recordConfirmGranted(record: ConfirmGrantedAuditRecord): void {
+      log.append({
+        kind: 'confirm/granted',
+        severity: 'high',
+        timestamp: new Date().toISOString(),
+        sessionId: record.sessionId,
+        toolName: record.toolName,
+        source: record.source,
+        waitMs: record.waitMs,
+        dangerTokenArmed: record.dangerTokenArmed,
+      })
+    },
+    recordConfirmDenied(record: ConfirmDeniedAuditRecord): void {
+      log.append({
+        kind: 'confirm/denied',
+        severity: 'high',
+        timestamp: new Date().toISOString(),
+        sessionId: record.sessionId,
+        toolName: record.toolName,
+        source: record.source,
+        reason: record.reason,
+        waitMs: record.waitMs,
+        ...record.hotkey !== undefined ? { hotkey: record.hotkey } : {},
+        ...record.pattern !== undefined ? { pattern: record.pattern } : {},
+        ...record.textBytes !== undefined ? { textBytes: record.textBytes } : {},
       })
     },
     recordActionRefusal(record: ActionRefusalAuditRecord): void {

@@ -16,8 +16,8 @@ working (observation and pause management never change system state).
 
 The state machine is platform-neutral and unit-testable; the monitor thread
 is Windows-only pure ctypes (no new dependencies). Every transition invokes
-the registered callback, which main.py uses to push a JSON-RPC notification
-to the Node plugin.
+the registered callback with the monotonic transition counter, which main.py
+uses to push a JSON-RPC notification to the Node plugin.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import time
 
 PAUSED_MARKER = "[dsh-cu-paused]"
 
-PAUSE_REASONS = ("hotkey", "user-input", "manual")
+PAUSE_REASONS = ("hotkey", "user-input", "manual", "confirm")
 
 _POLL_SECONDS = 0.05
 
@@ -52,7 +52,11 @@ class PauseState:
     """Thread-safe pause/in-flight state machine.
 
     Transitions are idempotent: pausing while paused (and resuming while
-    running) reports ``False`` and does not invoke the callback.
+    running) reports ``False`` and does not invoke the callback. Every real
+    transition bumps a monotonic counter carried on the notification, so the
+    Node plugin can order resumes against the pause it acked (the confirm
+    gate's race guard); the callback runs INSIDE the lock so notifications
+    reach the wire in transition order.
     """
 
     def __init__(self, on_transition=None) -> None:
@@ -60,6 +64,7 @@ class PauseState:
         self._paused = False
         self._in_flight = 0
         self._last_action_end: float | None = None
+        self._transition_seq = 0
         self._on_transition = on_transition
 
     @property
@@ -67,13 +72,20 @@ class PauseState:
         with self._lock:
             return self._paused
 
+    @property
+    def transition_seq(self) -> int:
+        """Current value of the monotonic transition counter."""
+        with self._lock:
+            return self._transition_seq
+
     def pause(self, reason: str) -> bool:
         """Enter the paused state; True when this call caused the transition."""
         with self._lock:
             if self._paused:
                 return False
             self._paused = True
-        self._notify(True, reason)
+            self._transition_seq += 1
+            self._notify(True, reason, self._transition_seq)
         return True
 
     def resume(self, reason: str) -> bool:
@@ -82,7 +94,8 @@ class PauseState:
             if not self._paused:
                 return False
             self._paused = False
-        self._notify(False, reason)
+            self._transition_seq += 1
+            self._notify(False, reason, self._transition_seq)
         return True
 
     def assert_running(self) -> None:
@@ -119,9 +132,9 @@ class PauseState:
                 return False
             return (time.monotonic() - self._last_action_end) * 1000 < grace_ms
 
-    def _notify(self, paused: bool, reason: str) -> None:
+    def _notify(self, paused: bool, reason: str, seq: int) -> None:
         if self._on_transition is not None:
-            self._on_transition(paused, reason)
+            self._on_transition(paused, reason, seq)
 
 
 class MonitorState:

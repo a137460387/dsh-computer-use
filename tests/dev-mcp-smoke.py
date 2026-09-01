@@ -95,6 +95,7 @@ def main() -> int:
     expected = {
         "get_display_info", "screen_shot", "click_at", "type_text", "scroll",
         "hotkey", "get_foreground_window", "resume_actions", "pause_actions",
+        "arm_danger_token",
     }
     check("tools/list surface", expected <= names, names)
 
@@ -135,7 +136,8 @@ def main() -> int:
     # screen_shot stays available, resume_actions releases it.
     send({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "pause_actions", "arguments": {}}})
     pause = recv(7)
-    check("pause_actions", pause.get("result", {}).get("structuredContent", {}).get("paused") is True, pause)
+    pause_content = pause.get("result", {}).get("structuredContent", {})
+    check("pause_actions", pause_content.get("paused") is True and isinstance(pause_content.get("transitionSeq"), int), pause)
 
     send({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "click_at", "arguments": {
         "x": width / 2, "y": height / 2, "screenshotWidth": width, "screenshotHeight": height,
@@ -157,6 +159,8 @@ def main() -> int:
     pause_notifications = [n for n in notifications if n.get("method") == "notifications/dsh-cu/pause-state"]
     pause_kinds = [(n.get("params") or {}).get("paused") for n in pause_notifications]
     check("pause-state notifications pushed", pause_kinds == [True, False], pause_notifications)
+    pause_seqs = [(n.get("params") or {}).get("transitionSeq") for n in pause_notifications]
+    check("pause-state notifications carry the transition counter", pause_seqs == [1, 2], pause_notifications)
 
     # Live click at the screenshot center with a valid observation.
     send({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "click_at", "arguments": {

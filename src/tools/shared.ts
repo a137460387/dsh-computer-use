@@ -17,6 +17,7 @@ import type { ComputerUseRuntime, ObservationId } from '../definition/index.ts'
 import type { ReadinessReport } from '../diagnostics/readiness.ts'
 import type { Auditor } from '../security/auditor.ts'
 import type { FailureDetector } from '../security/circuit-breaker.ts'
+import type { ConfirmGate } from '../security/confirm-gate.ts'
 import type { DangerFilter } from '../security/danger-filter.ts'
 import type { ChangeDetector, HashedFrame } from '../vision/change-detector.ts'
 import { runActionVerification, shouldVerify } from '../vision/verification.ts'
@@ -28,6 +29,8 @@ export interface ToolDeps {
   readonly dangerFilter: DangerFilter
   readonly breaker: FailureDetector
   readonly auditor: Auditor
+  /** Physical confirm gate for irreversible actions (inert while disabled). */
+  readonly confirmGate: ConfirmGate
   readonly changeDetector: ChangeDetector
   /** Vision calls for post-action verification and zoom-crop refinement. */
   readonly vision: VisionProvider
@@ -149,6 +152,51 @@ const HIGH_RISK_HOTKEYS: ReadonlySet<string> = new Set([
 /** Whether one key combination escalates to high risk. */
 export function isHighRiskHotkey(keys: readonly string[]): boolean {
   return HIGH_RISK_HOTKEYS.has(normalizeHotkey(keys))
+}
+
+/**
+ * Key-name aliases folded for the irreversible list ONLY: pyautogui presses
+ * the same physical key for both spellings, so the model could emit either
+ * one. Applied by {@link normalizeIrreversibleHotkey}, never by
+ * {@link normalizeHotkey} — the high-risk list keeps its canonical-only
+ * matching.
+ */
+const IRREVERSIBLE_KEY_ALIASES: Readonly<Record<string, string>> = {
+  del: 'delete',
+}
+
+/** One key name folded to its irreversible-list identity. */
+function canonicalIrreversibleKey(key: string): string {
+  const lower = key.toLowerCase()
+  return IRREVERSIBLE_KEY_ALIASES[lower] ?? lower
+}
+
+/** Canonical identity for the irreversible list: alias-folded, lowercased, sorted. */
+function normalizeIrreversibleHotkey(keys: readonly string[]): string {
+  return [...keys].map(canonicalIrreversibleKey).sort().join('+')
+}
+
+/**
+ * Key combinations whose effect cannot be undone by pressing another key
+ * (permanent deletion today): when `irreversibleConfirm` is enabled they
+ * route through the physical confirm gate INSTEAD of tier escalation and the
+ * approval seam — a whitelist escalation could otherwise lift the action to
+ * high risk and let a never-approval session swallow the wait. This set is a
+ * security invariant — fixed, not deployment-configurable, so a deployment
+ * cannot empty the protection by misconfiguration. Entries compare through
+ * {@link normalizeIrreversibleHotkey}: key order, case, and the delete/del
+ * alias are folded, so an alias spelling cannot slip past the gate.
+ * Parallel to, not merged with, {@link HIGH_RISK_HOTKEYS}: `alt+f4` stays
+ * high risk there and keeps its never-approval refusal (that list keeps its
+ * canonical-only matching).
+ */
+const IRREVERSIBLE_HOTKEYS: ReadonlySet<string> = new Set([
+  ['shift', 'delete'],
+].map(keys => normalizeIrreversibleHotkey(keys)))
+
+/** Whether one key combination demands the physical confirm gate. */
+export function isIrreversibleHotkey(keys: readonly string[]): boolean {
+  return IRREVERSIBLE_HOTKEYS.has(normalizeIrreversibleHotkey(keys))
 }
 
 /**

@@ -15,6 +15,7 @@ import { collectReadiness } from './src/diagnostics/readiness.ts'
 import McpComputerUseProvider from './src/provider-mcp/index.ts'
 import { createAuditor } from './src/security/auditor.ts'
 import { FailureDetector } from './src/security/circuit-breaker.ts'
+import { ConfirmGate, assertConfirmGateViable } from './src/security/confirm-gate.ts'
 import { DangerFilter } from './src/security/danger-filter.ts'
 import { SensitiveWindowPolicy } from './src/security/sensitive-window.ts'
 import { registerClickAt } from './src/tools/click-at.ts'
@@ -99,6 +100,9 @@ function routesMissingError(missing: readonly string[]): Error {
  */
 export function apply(ctx: Context, config: ComputerUseConfig): void {
   assertPlatformSupported()
+  // The confirm gate's physical signal must exist wherever it is enabled:
+  // refusing here beats a runtime wait no hotkey press can ever confirm.
+  assertConfirmGateViable(config, process.platform)
   // Self-contained config fails loud at load: uncompilable sensitive-window
   // regexes never survive to the first screen_shot (construction validates).
   // The retained instance feeds the readiness checklist.
@@ -123,11 +127,14 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
   const router = new VisionRouter(config)
   const vision = createVisionProvider(ctx, config, router)
   const changeDetector = new ChangeDetector(vision, config.similarityThreshold)
+  // Inert while irreversibleConfirm is off; the provider consults it for the
+  // pause re-hold reason across sidecar restarts.
+  const confirmGate = new ConfirmGate(ctx, config, auditor)
 
   // Direct construction (the ApprovalService precedent): ctx.plugin forwards
   // a single config argument, and the provider additionally needs the auditor.
   // The Service constructor self-registers and unloads with this fiber.
-  const provider = new McpComputerUseProvider(ctx, config, auditor)
+  const provider = new McpComputerUseProvider(ctx, config, auditor, confirmGate)
 
   // Internal diagnostics entry: tool code and operator scripts snapshot the
   // subsystem states on demand; the report never gates an action by itself.
@@ -140,7 +147,7 @@ export function apply(ctx: Context, config: ComputerUseConfig): void {
     ...sessionId !== undefined ? { session: { id: sessionId, stepsUsed: stepCounter.count(sessionId) } } : {},
   })
 
-  const deps: ToolDeps = { config, dangerFilter, breaker, auditor, changeDetector, vision, readiness }
+  const deps: ToolDeps = { config, dangerFilter, breaker, auditor, confirmGate, changeDetector, vision, readiness }
 
   registerScreenShot(ctx, deps)
   registerPeekCursor(ctx, deps)

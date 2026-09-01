@@ -42,4 +42,12 @@ describe('bundle entry', () => {
     expect(() => apply(ctx, refusalConfig({ sensitiveWindowPatterns: ['[unclosed'] })))
       .toThrow()
   })
+
+  it('refuses enabling irreversibleConfirm without the physical confirm signal', () => {
+    // Runs on win32 CI: the platform check passes, the empty takeover hotkey
+    // fails loud at activation instead of degrading to a permanent wait.
+    const ctx = new Context()
+    expect(() => apply(ctx, refusalConfig({ irreversibleConfirm: true, takeoverHotkey: [] })))
+      .toThrow(/requires a takeover hotkey/)
+  })
 })

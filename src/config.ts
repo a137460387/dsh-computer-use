@@ -77,6 +77,24 @@ export interface ComputerUseConfig {
    * This layer is a mis-fire backstop, not a reliable security boundary.
    */
   readonly dangerPatterns: string[]
+  /**
+   * Route irreversible actions through the physical confirm gate: hotkeys on
+   * the irreversible list and danger-pattern `type_text` hits pause desktop
+   * control with the `confirm` reason and wait for a takeover-hotkey press
+   * instead of their default handling (escalated approval / hard refusal).
+   * Off keeps both paths exactly at their pre-gate behavior; enabling fails
+   * loud where the physical confirm signal cannot exist (macOS, empty
+   * takeover hotkey).
+   */
+  readonly irreversibleConfirm: boolean
+  /**
+   * Generous backstop in milliseconds for one confirm-gate wait: on expiry
+   * the action closes denied, but desktop control STAYS paused — nothing
+   * resumes or retries automatically. Sized to cover a full unattended
+   * workday; it only protects against forgotten sessions, never nudges
+   * automation forward.
+   */
+  readonly confirmTimeoutMs: number
   /** Optional window whitelist; empty allows every window. */
   readonly allowedApps: string[]
   /**
@@ -187,6 +205,8 @@ export const Config: z<ComputerUseConfig> = z.object({
     '\\bmkfs\\b',
     '\\bdd\\b.*\\bof=/dev/',
   ]),
+  irreversibleConfirm: z.boolean().default(false),
+  confirmTimeoutMs: z.number().step(1).min(1000).max(MAX_TIMER_DELAY_MS).default(28_800_000),
   allowedApps: z.array(String).default([]),
   takeoverHotkey: z.array(String).default(['ctrl', 'alt', 'u']),
   pauseOnUserInput: z.boolean().default(true),

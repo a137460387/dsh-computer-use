@@ -1,7 +1,10 @@
 /**
  * `type_text` tool: types text after the danger filter (mis-fire backstop,
  * blocks force-fully and bypasses every auto-approval path) and approval
- * gating. The sidecar carries an aligned backstop of its own.
+ * gating. With `irreversibleConfirm` enabled, a danger hit instead pauses
+ * desktop control and waits for the physical confirm before releasing the
+ * payload with a single-use sidecar token. The sidecar carries an aligned
+ * backstop of its own.
  * @module dsh-computer-use/tools/type-text
  */
 
@@ -59,26 +62,44 @@ export function registerTypeText(ctx: Context, deps: ToolDeps): void {
       // Danger interception: force-block, high-risk audit record, and NO
       // auto-approval path — this precedes the approval gate on purpose.
       const danger = deps.dangerFilter.check(args.text)
+      let dangerToken: string | undefined
       if (danger !== undefined) {
-        deps.auditor.recordDanger({
+        if (!deps.config.irreversibleConfirm) {
+          deps.auditor.recordDanger({
+            sessionId,
+            toolName: 'type_text',
+            pattern: danger.pattern,
+            textBytes: Buffer.byteLength(args.text, 'utf8'),
+          })
+          throw new Error(
+            'dsh-computer-use: type_text blocked — the payload matches a danger pattern '
+            + 'and is never typed; rephrase the task or ask the user to do it manually',
+          )
+        }
+        // Confirm gate on: the hit pauses desktop control under the `confirm`
+        // reason and waits for the physical takeover-hotkey press instead of
+        // hard-refusing. The grant arms a single-use sidecar token so the
+        // sidecar's aligned backstop releases exactly this payload.
+        deps.breaker.assertCanAct()
+        const grant = await deps.confirmGate.guard({
           sessionId,
           toolName: 'type_text',
+          source: 'danger-pattern',
           pattern: danger.pattern,
           textBytes: Buffer.byteLength(args.text, 'utf8'),
+          ...exec.signal !== undefined ? { signal: exec.signal } : {},
         })
-        throw new Error(
-          'dsh-computer-use: type_text blocked — the payload matches a danger pattern '
-          + 'and is never typed; rephrase the task or ask the user to do it manually',
-        )
+        dangerToken = grant.dangerToken
+      } else {
+        deps.breaker.assertCanAct()
+        const tier = await whitelistTier(ctx, deps, 'medium')
+        await requestApproval(ctx, deps, exec, 'type_text', tier, `type ${args.text.length} characters into the focused window`)
       }
-
-      deps.breaker.assertCanAct()
-      const tier = await whitelistTier(ctx, deps, 'medium')
-      await requestApproval(ctx, deps, exec, 'type_text', tier, `type ${args.text.length} characters into the focused window`)
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).typeText({
         text: args.text,
+        ...dangerToken !== undefined ? { dangerToken } : {},
         ...args.basedOnObservationId !== undefined ? { basedOnObservationId: ObservationId(args.basedOnObservationId) } : {},
       })
       if (!result.success) throw new Error(`dsh-computer-use: typing refused: ${result.message ?? 'unknown sidecar error'}`)

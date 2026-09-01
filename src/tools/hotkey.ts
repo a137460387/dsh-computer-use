@@ -1,7 +1,9 @@
 /**
  * `hotkey` tool: presses one key combination. System shortcuts (run dialog,
  * settings, task manager, session lock, window close) escalate to high risk
- * and always require interactive confirmation.
+ * and always require interactive confirmation; with `irreversibleConfirm`
+ * enabled, irreversible combos (permanent deletion) route through the
+ * physical confirm gate instead.
  * @module dsh-computer-use/tools/hotkey
  */
 
@@ -11,6 +13,7 @@ import { ObservationId } from '../definition/index.ts'
 import {
   computerUse,
   isHighRiskHotkey,
+  isIrreversibleHotkey,
   isSameHotkey,
   maybeVerifyAction,
   normalizeHotkey,
@@ -58,13 +61,27 @@ export function registerHotkey(ctx: Context, deps: ToolDeps): void {
       const sessionId = sessionIdOf(exec)
       stepCounter.assert(sessionId, deps.config.maxSteps)
       deps.breaker.assertCanAct()
-      // The takeover combo itself escalates: the model must not toggle the
-      // pause state without explicit interactive confirmation.
-      const baseTier = isHighRiskHotkey(args.keys) || isSameHotkey(args.keys, deps.config.takeoverHotkey)
-        ? 'high'
-        : 'medium'
-      const tier = await whitelistTier(ctx, deps, baseTier)
-      await requestApproval(ctx, deps, exec, 'hotkey', tier, `press ${normalizeHotkey(args.keys)}`)
+      if (deps.config.irreversibleConfirm && isIrreversibleHotkey(args.keys)) {
+        // Irreversible combo: the physical confirm gate replaces tier
+        // escalation and the approval seam. Skipping both is deliberate — a
+        // whitelist escalation could lift the action to high risk and let a
+        // never-approval session swallow the wait the gate exists to hold.
+        await deps.confirmGate.guard({
+          sessionId,
+          toolName: 'hotkey',
+          source: 'hotkey-list',
+          hotkey: normalizeHotkey(args.keys),
+          ...exec.signal !== undefined ? { signal: exec.signal } : {},
+        })
+      } else {
+        // The takeover combo itself escalates: the model must not toggle the
+        // pause state without explicit interactive confirmation.
+        const baseTier = isHighRiskHotkey(args.keys) || isSameHotkey(args.keys, deps.config.takeoverHotkey)
+          ? 'high'
+          : 'medium'
+        const tier = await whitelistTier(ctx, deps, baseTier)
+        await requestApproval(ctx, deps, exec, 'hotkey', tier, `press ${normalizeHotkey(args.keys)}`)
+      }
       stepCounter.note(sessionId)
       deps.breaker.noteAction()
       const result = await computerUse(ctx).hotkey({

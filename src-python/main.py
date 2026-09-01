@@ -20,7 +20,11 @@ Pause state: a background monitor toggles pause on the takeover hotkey and
 pauses on user input outside the agent-action in-flight window. While paused
 the four action tools refuse with a `[dsh-cu-paused]` marker; every
 transition is pushed to the Node plugin as a `notifications/dsh-cu/pause-state`
-JSON-RPC notification (written under the stdout lock shared with responses).
+JSON-RPC notification carrying the monotonic transition counter (written
+under the stdout lock shared with responses). The Node plugin's confirm gate
+pauses through `pause_actions` with reason `confirm` and releases a
+danger-matching `type_text` exactly once through the `arm_danger_token`
+single-use token.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ import time
 
 # Sync point: keep aligned with the Node side's package.json "version" and
 # the MCP client identity version in src/provider-mcp/index.ts.
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 SERVER_NAME = "dsh-cu-server"
 
 # Protocol versions this server negotiates; the client's is echoed when known.
@@ -167,6 +171,10 @@ _TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "text": {"type": "string"},
                 "basedOnObservationId": {"type": "string"},
+                "dangerToken": {
+                    "type": "string",
+                    "description": "Internal: single-use backstop token issued by the Node-side confirm gate.",
+                },
             },
             "required": ["text"],
             "additionalProperties": False,
@@ -212,7 +220,29 @@ _TOOL_SCHEMAS: list[dict] = [
     {
         "name": "pause_actions",
         "description": "Pause desktop control actions until resumed.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["manual", "confirm"],
+                    "description": "Attribution pushed on the pause notification; defaults to manual.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "arm_danger_token",
+        "description": "Internal: arm the single-use token letting exactly one danger-matching type_text pass the backstop.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "token": {"type": "string"},
+            },
+            "required": ["token"],
+            "additionalProperties": False,
+        },
     },
 ]
 
@@ -285,8 +315,23 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
         return {"success": True, "resumed": resumed}
 
     if name == "pause_actions":
-        paused = pause_state.pause("manual")
-        return {"success": True, "paused": paused}
+        reason = arguments.get("reason", "manual")
+        if reason not in ("manual", "confirm"):
+            raise ValueError(f"pause_actions reason must be 'manual' or 'confirm', got {reason!r}")
+        paused = pause_state.pause(reason)
+        # The counter rides the response too: an already-paused no-op emits
+        # no notification, and the Node-side confirm gate still needs the
+        # comparison baseline.
+        return {"success": True, "paused": paused, "transitionSeq": pause_state.transition_seq}
+
+    # Confirm-gate plumbing, reachable while paused: it arms internal state,
+    # never the desktop.
+    if name == "arm_danger_token":
+        token = arguments.get("token")
+        if not isinstance(token, str) or not (1 <= len(token) <= 256):
+            raise ValueError("arm_danger_token needs a non-empty token string of at most 256 characters")
+        config["danger_token"] = token
+        return {"success": True}
 
     # The four mutating tools below refuse while paused and run inside the
     # in-flight window so the monitor never mistakes sidecar input for the user.
@@ -336,7 +381,14 @@ def _dispatch_tool(name: str, arguments: dict, config: dict) -> dict:
         text = str(arguments["text"])
         danger = danger_regex.find_danger(text)
         if danger is not None:
-            raise ValueError(f"type_text blocked by the sidecar danger backstop (pattern {danger!r})")
+            armed = config.get("danger_token")
+            presented = arguments.get("dangerToken")
+            if armed is not None and isinstance(presented, str) and presented == armed:
+                # Single-use: consumed on passage; every later danger payload
+                # is refused until the confirm gate arms a fresh token.
+                config["danger_token"] = None
+            else:
+                raise ValueError(f"type_text blocked by the sidecar danger backstop (pattern {danger!r})")
         pause_state.begin_action()
         try:
             input_core.type_text(text)
@@ -444,11 +496,12 @@ def main() -> None:
         except RuntimeError as error:
             raise SystemExit(f"{_LOG_PREFIX} refusing to start: {error}")
 
-    config["pause_state"] = PauseState(on_transition=lambda paused, reason: _write({
+    config["pause_state"] = PauseState(on_transition=lambda paused, reason, seq: _write({
         "jsonrpc": "2.0",
         "method": "notifications/dsh-cu/pause-state",
-        "params": {"paused": paused, "reason": reason},
+        "params": {"paused": paused, "reason": reason, "transitionSeq": seq},
     }))
+    config["danger_token"] = None
     start_monitor(config["pause_state"], config["monitor"])
 
     monitor = config["monitor"]

@@ -37,13 +37,13 @@ class PauseStateTransitions(unittest.TestCase):
         state.assert_running()  # must not raise
 
     def test_pause_then_resume_with_reasons(self) -> None:
-        transitions: list[tuple[bool, str]] = []
-        state = PauseState(on_transition=lambda paused, reason: transitions.append((paused, reason)))
+        transitions: list[tuple[bool, str, int]] = []
+        state = PauseState(on_transition=lambda paused, reason, seq: transitions.append((paused, reason, seq)))
 
         self.assertTrue(state.pause("hotkey"))
         self.assertTrue(state.paused)
         self.assertFalse(state.pause("user-input"))  # idempotent while paused
-        self.assertEqual(transitions, [(True, "hotkey")])
+        self.assertEqual(transitions, [(True, "hotkey", 1)])
 
         with self.assertRaises(PausedError):
             state.assert_running()
@@ -51,8 +51,29 @@ class PauseStateTransitions(unittest.TestCase):
         self.assertTrue(state.resume("manual"))
         self.assertFalse(state.paused)
         self.assertFalse(state.resume("manual"))  # idempotent while running
-        self.assertEqual(transitions, [(True, "hotkey"), (False, "manual")])
+        self.assertEqual(transitions, [(True, "hotkey", 1), (False, "manual", 2)])
         state.assert_running()  # must not raise again
+
+    def test_confirm_is_an_accepted_pause_reason(self) -> None:
+        transitions: list[tuple[bool, str, int]] = []
+        state = PauseState(on_transition=lambda paused, reason, seq: transitions.append((paused, reason, seq)))
+
+        self.assertTrue(state.pause("confirm"))
+        self.assertEqual(transitions, [(True, "confirm", 1)])
+
+    def test_transition_counter_is_monotonic_and_skips_idempotent_calls(self) -> None:
+        state = PauseState()
+        self.assertEqual(state.transition_seq, 0)
+        state.pause("confirm")
+        self.assertEqual(state.transition_seq, 1)
+        state.pause("manual")  # no-op while paused
+        self.assertEqual(state.transition_seq, 1)
+        state.resume("hotkey")
+        self.assertEqual(state.transition_seq, 2)
+        state.resume("hotkey")  # no-op while running
+        self.assertEqual(state.transition_seq, 2)
+        state.pause("user-input")
+        self.assertEqual(state.transition_seq, 3)
 
     def test_paused_error_carries_the_marker_and_resume_hint(self) -> None:
         error = PausedError()

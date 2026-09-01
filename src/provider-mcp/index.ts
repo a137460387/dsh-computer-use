@@ -12,9 +12,12 @@
  * Pause ownership: the sidecar's background monitor (takeover hotkey,
  * user-input detection) is the source of truth; every pause/resume transition
  * is pushed here as a `notifications/dsh-cu/pause-state` notification the
- * transport intercepts before the MCP SDK. This mirror drives the lifecycle
- * audit and re-engages the pause after any sidecar restart, so a crash never
- * silently unpauses desktop control.
+ * transport intercepts before the MCP SDK (each carries the sidecar's
+ * monotonic transition counter). This mirror drives the lifecycle audit,
+ * re-broadcasts transitions on `computer-use/pause-transition`, and
+ * re-engages the pause after any sidecar restart — under the `confirm`
+ * reason while a confirm-gate wait is pending — so a crash never silently
+ * unpauses desktop control.
  * @module dsh-computer-use/provider-mcp
  */
 
@@ -39,12 +42,15 @@ import type {
   ComputerUseActionType,
   DisplayInfo,
   HotkeyRequest,
+  PauseActionsResult,
+  PauseRequestReason,
   ScreenShot,
   ScreenShotOptions,
   ScrollRequest,
   TypeTextRequest,
 } from '../definition/index.ts'
 import type { Auditor, PauseReason, SidecarExitTrigger } from '../security/auditor.ts'
+import type { ConfirmGate } from '../security/confirm-gate.ts'
 import {
   PAUSED_MARKER,
   PausedRefusal,
@@ -61,9 +67,10 @@ const COMPATIBLE_SERVER_PREFIX = '0.1.'
 
 /**
  * The sidecar tool surface every handshake must prove before any call is
- * served: the seven model-exposed actions plus the two internal tools
+ * served: the seven model-exposed actions plus the three internal tools
  * (`get_foreground_window` for the whitelist, `pause_actions` for the
- * pause re-hold after restarts).
+ * pause re-hold after restarts, `arm_danger_token` for the confirm gate's
+ * single-use backstop token).
  */
 export const REQUIRED_SIDECAR_TOOLS = [
   'get_display_info',
@@ -75,6 +82,7 @@ export const REQUIRED_SIDECAR_TOOLS = [
   'get_foreground_window',
   'resume_actions',
   'pause_actions',
+  'arm_danger_token',
 ] as const
 
 /**
@@ -82,7 +90,7 @@ export const REQUIRED_SIDECAR_TOOLS = [
  * Sync point: keep aligned with package.json `version` and
  * src-python/main.py `VERSION` (one release moves all three).
  */
-const PLUGIN_VERSION = '0.1.3'
+const PLUGIN_VERSION = '0.1.4'
 
 /** Diagnostic tail retained from sidecar stderr. */
 const STDERR_DIAGNOSTIC_BYTES = 65_536
@@ -276,12 +284,15 @@ interface McpToolResultShape {
 
 /**
  * The MCP-backed computer-use service. Mounted by the bundle entry with the
- * validated {@link ComputerUseConfig} and the bundle auditor; the sidecar
+ * validated {@link ComputerUseConfig}, the bundle auditor, and the confirm
+ * gate whose pending wait steers the restart pause re-hold; the sidecar
  * starts lazily at first use.
  */
 export default class McpComputerUseProvider extends ComputerUseRuntime {
   private readonly config: ComputerUseConfig
   private readonly auditor: Auditor
+  /** Confirm gate consulting the pause re-hold; absent keeps the pre-gate hold. */
+  private readonly confirmGate: ConfirmGate | undefined
   private handle: SubprocessHandle | undefined
   private client: Client | undefined
   private transport: SidecarTransport | undefined
@@ -301,10 +312,11 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
   /** Tool count enumerated at the current handshake (readiness diagnostics). */
   private connectedToolCount: number | undefined
 
-  constructor(ctx: Context, config: ComputerUseConfig, auditor: Auditor) {
+  constructor(ctx: Context, config: ComputerUseConfig, auditor: Auditor, confirmGate?: ConfirmGate) {
     super(ctx)
     this.config = config
     this.auditor = auditor
+    this.confirmGate = confirmGate
     ctx.effect(() => {
       return async () => {
         this.disposed = true
@@ -451,9 +463,12 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     }
 
     // A reconnecting sidecar starts unpaused; re-engage the user's pause so a
-    // crash or health restart never silently unpauses desktop control.
+    // crash or health restart never silently unpauses desktop control. A
+    // pending confirm wait re-holds under its own reason: the confirm signal
+    // (a takeover-hotkey resume) must stay meaningful across the restart.
     if (this.paused) {
-      const rehold = await client.callTool({ name: 'pause_actions', arguments: {} }, undefined, {
+      const reholdReason = this.confirmGate?.hasPendingConfirm === true ? 'confirm' : 'manual'
+      const rehold = await client.callTool({ name: 'pause_actions', arguments: { reason: reholdReason } }, undefined, {
         timeout: this.config.rpcTimeoutMs,
       }) as McpToolResultShape
       if (rehold.isError === true) {
@@ -479,13 +494,17 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     if (message.method !== PAUSE_STATE_NOTIFICATION) return
     const params = message.params
     if (typeof params !== 'object' || params === null) return
-    const { paused, reason } = params as { paused?: unknown; reason?: unknown }
+    const { paused, reason, transitionSeq } = params as { paused?: unknown; reason?: unknown; transitionSeq?: unknown }
     if (typeof paused !== 'boolean' || paused === this.paused) return
     this.paused = paused
-    const safeReason: PauseReason = reason === 'hotkey' || reason === 'user-input' || reason === 'manual'
+    const safeReason: PauseReason = reason === 'hotkey' || reason === 'user-input' || reason === 'manual' || reason === 'confirm'
       ? reason
       : 'manual'
+    // A malformed counter degrades to -1: the confirm gate compares resume
+    // counters strictly above its ack, so -1 never confirms (fail closed).
+    const safeSeq = typeof transitionSeq === 'number' && Number.isFinite(transitionSeq) ? transitionSeq : -1
     this.auditor.recordLifecycle({ event: paused ? 'paused' : 'resumed', reason: safeReason })
+    this.ctx.emit('computer-use/pause-transition', { paused, reason: safeReason, transitionSeq: safeSeq })
     this.ctx.logger.info(`dsh-computer-use: desktop control ${paused ? 'paused' : 'resumed'} (${safeReason})`)
   }
 
@@ -732,6 +751,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
       this.assertObservationFresh(request.basedOnObservationId, 'type_text')
       return this.runAction('type_text', request.basedOnObservationId, `chars=${request.text.length}`, () => this.callSidecar<ActionResult>('type_text', {
         text: request.text,
+        ...request.dangerToken !== undefined ? { dangerToken: request.dangerToken } : {},
         ...request.basedOnObservationId !== undefined ? { basedOnObservationId: request.basedOnObservationId } : {},
       }))
     })
@@ -793,6 +813,25 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
           : 'desktop control was not paused',
         durationMs: result.durationMs,
       }
+    })
+  }
+
+  pauseActions(reason: PauseRequestReason): Promise<PauseActionsResult> {
+    return this.enqueue(async () => {
+      const result = await this.callSidecar<{ success: boolean; paused?: unknown; transitionSeq?: unknown; durationMs: number }>(
+        'pause_actions',
+        { reason },
+      )
+      if (typeof result.transitionSeq !== 'number' || !Number.isFinite(result.transitionSeq)) {
+        throw new Error('dsh-computer-use: sidecar pause_actions response lacks a usable transitionSeq protocol field')
+      }
+      return { paused: result.paused === true, transitionSeq: result.transitionSeq, durationMs: result.durationMs }
+    })
+  }
+
+  armDangerToken(token: string): Promise<void> {
+    return this.enqueue(async () => {
+      await this.callSidecar<{ success: boolean }>('arm_danger_token', { token })
     })
   }
 

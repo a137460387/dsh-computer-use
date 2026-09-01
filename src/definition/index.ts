@@ -11,6 +11,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { PauseReason } from '../security/auditor.ts'
 
 /**
  * One screenshot observation. Service-issued (a fresh id per
@@ -146,6 +147,28 @@ export interface TypeTextRequest {
   readonly text: string
   /** Freshness proof; the sidecar rejects references older than the TTL. */
   readonly basedOnObservationId?: ObservationId
+  /**
+   * Single-use sidecar danger-backstop token armed after a confirm-gate
+   * grant; absent for ordinary typing. Internal seam plumbing — the model
+   * never supplies or sees it.
+   */
+  readonly dangerToken?: string
+}
+
+/** Reasons a Node-side caller may request a pause. */
+export type PauseRequestReason = 'manual' | 'confirm'
+
+/** Outcome of one pause request. */
+export interface PauseActionsResult {
+  /** Whether this call caused the pause transition (false when already paused). */
+  readonly paused: boolean
+  /**
+   * The sidecar's monotonic pause-transition counter after this call; the
+   * confirm gate only accepts resume notifications strictly beyond it.
+   */
+  readonly transitionSeq: number
+  /** Sidecar-side execution time in milliseconds. */
+  readonly durationMs: number
 }
 
 /** Scroll direction vocabulary. */
@@ -221,6 +244,19 @@ export interface ObservationExpiredEvent {
   readonly expiredAtMs: number
 }
 
+/** Facts announced on every sidecar pause-state transition. */
+export interface PauseTransitionEvent {
+  /** The new pause state. */
+  readonly paused: boolean
+  /** Why the transition happened. */
+  readonly reason: PauseReason
+  /**
+   * The sidecar's monotonic pause-transition counter at this transition;
+   * wire-order identity the confirm gate compares against its pause ack.
+   */
+  readonly transitionSeq: number
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     computerUse: ComputerUseRuntime
@@ -248,6 +284,13 @@ declare module '@deepseek-ai/cordis' {
      * @mode parallel
      */
     'computer-use/observation-expired'(this: ComputerUseRuntime, event: ObservationExpiredEvent): void
+    /**
+     * Announce one sidecar pause-state transition; the mirror, the lifecycle
+     * audit, and the confirm gate all hang off this event.
+     * @param event - the transition facts.
+     * @mode parallel
+     */
+    'computer-use/pause-transition'(this: ComputerUseRuntime, event: PauseTransitionEvent): void
   }
 }
 
@@ -337,6 +380,23 @@ export abstract class ComputerUseRuntime extends Service {
    * @returns the action outcome; `message` says whether anything changed.
    */
   abstract resumeActions(): Promise<ActionResult>
+
+  /**
+   * Pause desktop control actions from the Node side. Works while paused
+   * (idempotent) and while running; observation tools keep working.
+   * @param reason - `manual` for operator pauses, `confirm` for the
+   * confirm gate's irreversible-action wait.
+   * @returns the pause outcome plus the sidecar's transition counter.
+   */
+  abstract pauseActions(reason: PauseRequestReason): Promise<PauseActionsResult>
+
+  /**
+   * Arm the sidecar's single-use danger-backstop token after a confirm-gate
+   * grant, letting exactly one subsequent danger-matching `type_text` pass
+   * the sidecar's aligned backstop. Internal plumbing, never model-facing.
+   * @param token - the token the sidecar must match and consume.
+   */
+  abstract armDangerToken(token: string): Promise<void>
 }
 
 export default ComputerUseRuntime

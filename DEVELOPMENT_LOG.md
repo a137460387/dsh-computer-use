@@ -1071,3 +1071,202 @@ kind，只给既有 `verification/result` 行补一个可选 `observationId`
 3. 既有 `verification/result` 行的 `retryObservationId`（重试点击的
    zoom-crop 观测）与本次新增的 `observationId`（判定依据的 before 帧
    观测）是两个不同观测，字段名与 JSDoc 各自独立，未做合并。
+
+## P11：不可逆动作物理确认门（irreversibleConfirm，默认关闭）
+
+2026-09-01 实现。背景：此前插件只有「分级」一层保护——medium 配额内自动
+放行（完全绕过宿主审批缝）、high 走宿主审批、never 会话确定性拒绝；
+type_text 危险正则是命中即硬拒绝。不存在独立于分级之外、必须真人物理
+动作才能放行的确认层。本轮新增 `confirmGate`，把不可逆动作改为
+「暂停桌面控制 + 等待接管热键物理确认」，不依赖宿主审批缝。
+
+### P11-1：机制（已拍板设计的落地形态）
+
+- 新增 `src/security/confirm-gate.ts`（`ConfirmGate` 类，随 `ToolDeps`
+  分发；构造即订阅 `computer-use/pause-transition` 事件）。
+- 命中后流程：`pause_actions(reason='confirm')` 主动暂停 → 工具调用挂起
+  → 确认信号 = 接管热键物理按下产生的 `reason:'hotkey'` 恢复；
+  `resume_actions` 产生的 `reason:'manual'` 恢复判定为拒绝（自救即拒绝）。
+  不新建审批状态机，复用既有暂停原因字段区分两支。
+- 超时语义（T1 为主 + 宽松兜底转 T2a）：默认无限期等待；
+  `confirmTimeoutMs`（默认 28_800_000 = 8 小时，数小时级宽松兜底，
+  只为防会话被彻底遗忘时永久悬挂）到期后该动作以「确认超时」结案并
+  审计，但暂停状态继续保持——不自动恢复、不自动重试、不拉黑指纹；
+  模型要继续必须自己调 `resume_actions`。明确不实现 T2b（超时自动恢复）。
+- 每进程同一时刻只允许一个待决确认：已有等待时第二个命中立即拒绝
+  （审计 `confirm/denied reason='busy' waitMs=0`），不排队，避免确认对象歧义。
+- 审计族 `confirm/requested`、`confirm/granted`、`confirm/denied`
+  （均 `severity:'high'`）；type_text 触发只记 pattern 标识与字节数，
+  命中文本本身不落盘（沿用敏感内容不落盘惯例）。`lifecycle/paused` /
+  `lifecycle/resumed` 的 `reason` 词表扩展出 `'confirm'`，可与
+  confirm/* 两族日志对照。
+
+### P11-2：hotkey 侧
+
+- 不可逆清单是代码内固定常量 `IRREVERSIBLE_HOTKEYS`（`src/tools/shared.ts`），
+  本轮只收录 `shift+delete`，按 `normalizeHotkey` 规范化形式存储（键序无关）。
+  与 `HIGH_RISK_HOTKEYS` 并列、不合并：安全不变量，不做配置项，避免部署
+  误配置置空导致保护静默失效。
+- `alt+f4` 明确不纳入：保留其在 `HIGH_RISK_HOTKEYS` 下、never 会话直接
+  确定性拒绝的语义（测试断言了两者的互不吸收）。
+- 门检先于分级判断执行；命中后跳过 `whitelistTier` 与 `requestApproval`
+  直接进入确认流程。跳过是必须的：否则 `whitelistTier` 仍可能把动作升到
+  high 送进宿主审批缝，被 never 会话吞掉，确认流程等于白做。工具级测试
+  断言了「配置了 allowedApps 时 gate 路径不调 getForegroundWindow、
+  不调 ctx.approval.request」。
+- 未命中清单的按键，`baseTier → whitelistTier → requestApproval` 逐字节不变。
+
+### P11-3：type_text 侧与一次性跨进程令牌
+
+- 触发集复用现有 `dangerPatterns`，不新建清单。总开关关闭时命中即硬拒绝，
+  逐字节不变；开关打开时命中走确认等待。
+- 放行冲突的解法：sidecar 侧危险正则兜底看不到 Node 侧确认结果，故引入
+  一次性跨进程令牌——确认达成后 Node 生成 16 字节随机 nonce
+  （`randomBytes(16).hex`），经新增内部 RPC `arm_danger_token` 武装到
+  sidecar 单槽；`type_text` 到达 sidecar 时，仅当「危险模式命中 ∧ 呈现的
+  `dangerToken` 与武装值相等」才消费令牌放行（消费发生在放行时点，物理
+  输入失败同样作废令牌）；错配/缺席令牌的一切危险载荷继续全量拦截，
+  兜底语义不被削弱。令牌经 `TypeTextRequest.dangerToken`（内部缝字段，
+  模型不可见）随调用传递。
+- 已知边角（有意不实现）：确认放行后、派发前 sidecar 崩溃，新 sidecar
+  没有该令牌，派发会被兜底拒绝（fail-closed，安全方向）；模型重试会触发
+  新一轮确认。未做重连后重新武装，保持改动面最小。
+
+### P11-4：竞态判定（恢复通知严格晚于暂停成立）
+
+- sidecar 的 `PauseState` 新增单调转移计数器 `transition_seq`：每次真实
+  转移在锁内自增并由回调携带（回调也在锁内执行，保证通知按转移顺序上
+  线）；`notifications/dsh-cu/pause-state` 与 `pause_actions` 应答都带
+  `transitionSeq`。
+- Node 侧 ack 基线：等待本次暂停产生的 `pause(confirm)` 通知（先于应答
+  到达，天然按线序处理）武装 `ackSeq`；「暂停已是事实」的 no-op 场景
+  没有通知，用应答里的计数器兜底。恢复通知只有当
+  `transitionSeq > ackSeq` 才参与判定，否则忽略——门检触发前一刻的历史
+  按键、暂停 RPC 在途时抢跑的恢复都不会被误读为确认。暂停 RPC 应答后
+  才到达的抢跑恢复先挂起（deferredResume），ack 落定后按同一比较重审。
+- sidecar 崩溃重启：既有重挂路径在存在待决确认时以 `confirm` 原因重挂
+  （`provider.confirmGate?.hasPendingConfirm`），重挂产生的
+  `pause(confirm)` 通知会以新计数器重新武装 `ackSeq`，Node 侧待决记录
+  跨重启存活。无待决确认时重挂保持 `manual`（开关关闭时行为不变）。
+
+### P11-5：协议版本与三处同步点
+
+协议做加法式增量（新内部工具 + 新参数 + 通知新字段），版本 0.1.3 → 0.1.4：
+
+1. `src-python/main.py:38` `VERSION = "0.1.4"`；
+2. `src/provider-mcp/index.ts` `PLUGIN_VERSION = '0.1.4'`；
+3. `package.json` `"version": "0.1.4"`。
+
+兼容性前缀判断不变（`COMPATIBLE_SERVER_PREFIX = '0.1.'`）：0.1.4 仍匹配
+`0.1.*`，容忍加法式增长的语义成立。`REQUIRED_SIDECAR_TOOLS` 加入
+`arm_danger_token`（9 → 10 项），旧 sidecar 在握手期即被明确拒绝
+（fail loud），不会出现半新半旧的静默组合。
+
+### P11-6：配置与 fail loud
+
+- `irreversibleConfirm: boolean` 默认 `false`；`confirmTimeoutMs: number`
+  默认 28_800_000（下限 1000，上限 `MAX_TIMER_DELAY_MS`）。
+- 总开关打开时，`takeoverHotkey` 为空或平台为 darwin（暂停监视器不支持
+  macOS）→ 激活时即抛错拒绝生效（`assertConfirmGateViable`），不跑到运行
+  期才变成永久拒绝。
+- 仓库自带 `cordis.patch.yml` 未改动：新配置只经部署层显式覆盖打开，
+  仓库侧默认值保持关闭/安全。
+
+### P11-7：生产行为零改变自证（总开关默认关闭）
+
+- 模型可见工具零变化：`hotkey` 与 `type_text` 的 `defineTool()`
+  description / parameters / output schema 无任何改动，且由
+  `tests/tools/confirm-gate-tools.spec.ts` 的「model-visible tool schema
+  stays byte-identical」两条用例以全文精确断言固化（改动前后同值）。
+- hotkey 分级路径：开关关闭时 `shift+delete` 仍走 medium 配额自动放行、
+  `alt+f4` 仍走 high 审批缝（工具级回归用例断言）；`shared.spec.ts` 的
+  既有分级/审批断言全部原样通过。
+- type_text 危险路径：开关关闭时命中即 `danger/blocked` 审计 + 原错误文案
+  硬拒绝、不派发、不产生任何暂停/确认副作用（工具级回归用例断言）；
+  `danger-filter.spec.ts` 25 条既有断言原样通过。
+- sidecar：`pause_actions` 无参调用默认仍 `manual`；无令牌时危险兜底错误
+  文案逐字节不变；`PauseState` 幂等语义不变（回调增参为纯增量）。
+- 重挂路径：无待决确认时重挂原因仍 `manual`，通知/审计行与改前一致。
+
+### P11-8：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误。
+- `vitest run` 263/263（222 旧 + 41 新：confirm-gate.spec 19、
+  confirm-gate-tools.spec 10、auditor.spec confirm 族 3、
+  provider-mcp 暂停转移 3、definition 配置 2、shared 不可逆清单 2、
+  index.spec confirm 门 fail-loud 启用用例 1；工具表面计数 9→10 为
+  更新既有断言）。
+- 覆盖率（分母不变，仍 definition/diagnostics/security/vision 四族）：
+  语句 95.51%（基线 95.39%）/ 分支 87.75%（87.13%）/ 函数 98.30%
+  （98.00%）/ 行 96.36%（96.04%）——四项均不低于基线。
+  `confirm-gate.ts` 自身 95.83/88.13/100/97.59，未覆盖 3 行是
+  `denialMessage` 中 pause-failed/arm-failed 的不可达兜底返回与
+  `assertNever` 穷尽分支（与基线中 auditor sweep catch 同类）。
+- `python -m unittest discover -s tests/python` 78/78（63 旧 + 15 新：
+  test_pause 转移计数器/confirm 原因 3 条，test_confirm.py 版本前缀、
+  pause_actions 协议、arm_danger_token、令牌消费共 12 条；
+  既有 test_pause 转移用例随回调增参更新断言）。
+
+### P11-9：只记录（本轮未动 / 实现中发现）
+
+1. 键名别名缺口：不可逆清单的 `del` 别名已按评审决策折叠（见 P12，
+   `shift+del` 不再绕过）；既有 `HIGH_RISK_HOTKEYS` 上的同类缺口
+   （`escape` vs `esc`）仍保留，明确不在该修复范围内，另行评估。
+2. 确认手势复用接管热键：人回来下意识按接管热键恢复工作，会顺手确认
+   待决的不可逆动作——该风险已与设计方确认接受，实现未加二次防误触。
+3. 本机 `bin/dsh-cu-server-win-x64.exe` 为 git-ignored 构建产物，协议
+   增量后本地 prod 二进制已过期；新 Node 在握手期以
+   `does not advertise the "arm_danger_token" tool` 明确拒绝旧二进制，
+   重新 `pnpm run build:python` 即恢复。
+4. 上游引用均为只读行为确认：`ctx.approval.request` 缝语义、
+   `PauseState` 通知链均取自本仓库既有实现与探查结论，未改动上游
+   deepseek-harness 任何文件。
+5. readiness 清单未新增确认门条目（设计未要求），留作可选后续。
+
+## P12：不可逆清单的 del 别名折叠（评审收尾补丁）
+
+2026-09-01 修复。P11-9.1 记录：pyautogui 对 `del` / `delete` 两种拼写
+按同一物理键处理，模型发 `['shift','del']` 可绕过只存规范化
+`delete` 的不可逆清单。评审拍板：仅给不可逆清单的匹配逻辑加别名归一
+化；`HIGH_RISK_HOTKEYS` 的同类缺口（`escape` vs `esc`）明确不碰。
+
+### P12-1：实现与作用域
+
+- `src/tools/shared.ts` 新增三个模块私有定义：
+  `IRREVERSIBLE_KEY_ALIASES`（仅 `del → delete` 一条）、
+  `canonicalIrreversibleKey`、`normalizeIrreversibleHotkey`
+  （别名折叠 + 小写 + 排序拼接）。`IRREVERSIBLE_HOTKEYS` 的构建与
+  `isIrreversibleHotkey` 的比较改走该归一化器——别名折叠只存在于这条
+  路径。
+- 共享的 `normalizeHotkey` 逐字节未动：`HIGH_RISK_HOTKEYS` 匹配
+  （`isHighRiskHotkey`）、接管组合比较（`isSameHotkey`）、
+  工具展示文案全部保持规范化形式匹配，escape/esc 缺口按决策保留。
+  `tests/tools/shared.spec.ts` 新增一条「共享归一化器不折叠别名」断言
+  把作用域钉死。
+- `hotkey.ts` / `type-text.ts` 的 `defineTool()` 与 execute 分支、
+  confirmGate 状态机、超时（T1 + 8h 转 T2a）、确认手势、sidecar 协议
+  与令牌机制全部零改动（别名判定发生在 Node 侧、派发之前）。
+- 审计行为：`confirm/requested` 的 `hotkey` 字段照旧记录模型实际发出
+  的键形（序/大小写规范化后），`del+shift` 与 `delete+shift` 各自如实
+  落盘，都对应同一次门检触发。
+
+### P12-2：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误。
+- `vitest run` 267/267（263 + 4 新：`shared.spec` 别名折叠用例一、
+  「共享归一化器不折叠别名」用例一，`confirm-gate-tools.spec`
+  hotkey 工具 `del` 拼写开关开门检用例一、开关关分级路径回归用例一；
+  另在既有 `isIrreversibleHotkey` 两条用例内扩充别名/超集断言）。
+- `python -m unittest discover -s tests/python` 78/78（sidecar 零改动）。
+- 覆盖率四项与当前基线完全持平（95.51/87.75/98.30/96.36）：
+  `src/tools` 与工具级测试本就不在分母（definition/diagnostics/
+  security/vision 四族）内，分母文件零改动。
+
+### P12-3：只记录
+
+1. `shiftleft` / `shiftright` 等修饰键别名在 pyautogui 词表中同样存在，
+   是同类缺口的更外层形态；本轮范围严格限定 `del`/`delete`，未扩面。
+2. 工具级 `del` 拼写门检用例同时断言了「不放行即拒绝」的另一面：
+   开关关闭时 `['shift','del']` 仍走 medium 配额自动放行（与改前逐字
+   节一致），开关打开时才进确认流程——两种拼写在两种开关态下的行为
+   都被测试钉死。

@@ -10,6 +10,8 @@ import type {
   ClickAtRequest,
   DisplayInfo,
   HotkeyRequest,
+  PauseActionsResult,
+  PauseRequestReason,
   ScreenShot,
   ScreenShotOptions,
   ScrollRequest,
@@ -39,6 +41,12 @@ class TestRuntime extends ComputerUseRuntime {
   getObservation(): Promise<ScreenShot | undefined> { return Promise.resolve(undefined) }
   getForegroundWindow(): Promise<string> { return Promise.resolve('') }
   resumeActions(): Promise<ActionResult> {
+    return Promise.reject(new Error('not implemented'))
+  }
+  pauseActions(_reason: PauseRequestReason): Promise<PauseActionsResult> {
+    return Promise.reject(new Error('not implemented'))
+  }
+  armDangerToken(_token: string): Promise<void> {
     return Promise.reject(new Error('not implemented'))
   }
 }
@@ -81,6 +89,16 @@ describe('Config schema', () => {
     expect(config.monitorStartupGraceMs).toBe(500)
     expect(config.sensitiveWindowPatterns).toEqual(expect.arrayContaining(['keepass', '1password', '网银']))
     expect(config.sensitiveWindowAllowlist).toEqual([])
+  })
+
+  it('ships the confirm gate off with a generous hour-scale wait backstop', () => {
+    const config = testConfig()
+    expect(config.irreversibleConfirm).toBe(false)
+    expect(config.confirmTimeoutMs).toBe(28_800_000)
+  })
+
+  it('rejects a confirm timeout below the one-second floor', () => {
+    expect(() => testConfig({ confirmTimeoutMs: 999 })).toThrow()
   })
 
   it('rejects a missing required path', () => {
