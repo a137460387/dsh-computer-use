@@ -989,3 +989,85 @@ Model Experience 守卫清单，Troubleshooting 新增 "Audit log" 条目
    只覆盖审批与新鲜度拒绝）。
 5. 拒绝审计与写入失败告警均无配置开关（理由见 P9-2）；未来若部署提出
    静音需求，再按 `actionVerification` 风格的枚举项评估。
+
+## Phase 10 交付结论（verification/result 审计行补 observationId 字段，2026-09-01）
+
+### P10-1：动机与范围
+
+`verification/result` 审计行记录 verdict / reason / modelTier / retry
+事实，但不记录判定所依据的 before 帧是哪一次观测：复盘与离线统计
+verdict 质量时，无法把一条判定关联回具体截图观测，也就无法按观测
+核对「判定说没生效、屏幕到底变没变」。方案 A（已核准）：不新增审计
+kind，只给既有 `verification/result` 行补一个可选 `observationId`
+字段——族内字段扩展，与 `action/before` / `action/after` 行既有的
+`observationId` 语义对齐。
+
+### P10-2：改了什么
+
+1. `src/security/auditor.ts`：`VerificationAuditRecord` 增可选
+   `observationId`（verdict 比较所依据的 before 帧观测 ID）；
+   `recordVerification` 按既有 `retryObservationId` 同款条件展开写入，
+   无 ID 时字段省略。
+2. `src/tools/shared.ts`：`maybeVerifyAction`（type_text / scroll /
+   hotkey 共用路径）的 `recordVerification` 调用透传
+   `deps.previousShotId`；该路径门控只要求 baseline 存在、不要求 ID，
+   故同样用条件展开，ID 缺席时省略。
+3. `src/tools/click-at.ts`：`execute` 内的 `recordVerification` 调用
+   透传 `basisId`——门控（`basisId !== undefined`）保证非空，直接赋值；
+   改动仅在审计调用参数，`defineTool()` 的 name / description /
+   parameters / output schema 未触碰。
+4. 测试三新增一补充：auditor.spec 新增「无 ID 时字段省略」用例
+   （`Object.keys` 风格）、既有「records a verification verdict…」
+   用例补 `observationId` 断言；shared.spec 与 cursor_overlay.spec 各
+   新增一条「recordVerification 收到正确的 observationId」用例
+   （沿用 `depsOf()` + mock auditor 模式）。
+5. README Key facts 两处 `verification/result` 字段描述补
+   `observationId`。
+
+### P10-3：生产行为零改变自证
+
+- 成本分级路由零变化：`analysisTier` / `changeDetectionTier` /
+  `verificationTier` 三者默认值（pro / flash / flash）与路由行为在
+  `config.ts`、`vision/router.ts` 逐字节未动。
+- 判定逻辑零变化：`vision/verification.ts` 本轮零改动；
+  `verifyActionEffect` / `runActionVerification` 的判定逻辑、降级路径
+  与返回值语义未变；verdict 注解到工具结果消息的文案逐字节未动。
+  本轮纯给既有审计调用多带一个字段。
+- 模型可见工具零变化：`src/tools/` 下 8 个工具的 `defineTool()`
+  name / description / parameters / output schema 无任何改动；
+  `shared.ts` 与 `click-at.ts` 的改动只落在审计调用参数上。
+- 无新增配置字段；`src-python` 与 sidecar 零改动，协议版本号不变
+  （仍 0.1.3）。
+- 审计写入负载：`actionVerification` 默认 `off` 时本就不产生
+  `verification/result` 行，零新增写入；开启后也只在既有行上多一个
+  可选字段。
+
+### P10-4：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误。
+- `vitest run` 222/222（219 旧 + 3 新：auditor.spec 省略用例一、
+  shared.spec maybeVerifyAction 透传用例一、cursor_overlay.spec
+  click_at 透传用例一；另在既有「records a verification verdict…」
+  用例上追加 `observationId` 断言）。
+- 覆盖率（分母不变，仍 definition/diagnostics/security/vision 四族）：
+  语句 95.39%（基线 95.39%）/ 分支 87.13%（87.03%，新增条件展开两分支
+  均被测试覆盖，总分母 +2）/ 函数 98%（98.00%）/ 行 96.04%（96.04%）
+  ——四项均不低于基线。auditor.ts 未覆盖两行（405/421）与基线
+  （402/418）一一对应，是两处 sweep 失败 catch 的既有不可测分支，
+  仅行号平移。
+- `python -m unittest discover -s tests/python` 63/63（sidecar 未动）。
+
+### P10-5：只记录（本轮未动）
+
+1. `actionVerification` 开关维持默认 `off`：仓库内唯一生效配置层
+   （`cordis.patch.yml` 的 `- insert` 行）只设两条审计路径，未设该键；
+   README 配置样例与注释指引也均为 `'off'`。开关不开，
+   `verification/result` 行不产生，本字段也就没有数据——开始攒数据
+   需部署层显式开成 `sampled` 或 `always`。本轮不改该开关。
+2. `maybeVerifyAction` 路径（type_text / scroll / hotkey）在
+   `previousShotId` 缺席时省略该字段：门控只要求 baseline，不要求
+   ID。生产上 `screen_shot` 成对写入 `previousShot` / `previousShotId`，
+   缺席只可能出现在合成 deps 的边角场景。
+3. 既有 `verification/result` 行的 `retryObservationId`（重试点击的
+   zoom-crop 观测）与本次新增的 `observationId`（判定依据的 before 帧
+   观测）是两个不同观测，字段名与 JSDoc 各自独立，未做合并。

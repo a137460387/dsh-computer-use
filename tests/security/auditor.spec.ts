@@ -234,6 +234,7 @@ describe('createAuditor', () => {
     auditor.recordVerification({
       sessionId: 'sess-1',
       toolName: 'click_at',
+      observationId: 'obs-base',
       verdict: 'uncertain',
       reason: 'no visible response',
       modelTier: 'flash',
@@ -249,6 +250,7 @@ describe('createAuditor', () => {
       kind: 'verification/result',
       sessionId: 'sess-1',
       toolName: 'click_at',
+      observationId: 'obs-base',
       verdict: 'uncertain',
       reason: 'no visible response',
       modelTier: 'flash',
@@ -259,6 +261,17 @@ describe('createAuditor', () => {
     })
     // A verdict without retry facts or a tier omits them instead of logging undefined.
     expect(Object.keys(lines[1] ?? {}).sort()).toEqual(['kind', 'retried', 'timestamp', 'toolName', 'verdict'])
+  })
+
+  it('omits observationId from a verification line without a basis observation', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordVerification({ toolName: 'type_text', verdict: 'yes', retried: false })
+
+    const lines = await waitForLines(config.auditLogPath, 1)
+    expect(Object.keys(lines[0] ?? {}).sort()).toEqual(['kind', 'retried', 'timestamp', 'toolName', 'verdict'])
   })
 
   it('reports write health none, then ok once an append lands', async () => {

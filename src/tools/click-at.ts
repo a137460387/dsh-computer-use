@@ -164,6 +164,7 @@ export function registerClickAt(ctx: Context, deps: ToolDeps): void {
         deps.auditor.recordVerification({
           sessionId,
           toolName: 'click_at',
+          observationId: basisId,
           verdict: verdict.verdict,
           reason: verdict.reason,
           ...verdict.tier !== undefined ? { modelTier: verdict.tier } : {},

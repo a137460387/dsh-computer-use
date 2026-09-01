@@ -82,6 +82,8 @@ export interface VerificationAuditRecord {
   readonly sessionId?: string
   /** The tool whose action was verified. */
   readonly toolName: string
+  /** Observation of the before frame the verdict compared against, when known. */
+  readonly observationId?: string
   /** The verdict on whether the intended effect happened. */
   readonly verdict: 'yes' | 'no' | 'uncertain'
   /** The model's one-line justification, when one survived parsing. */
@@ -363,6 +365,7 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         timestamp: new Date().toISOString(),
         ...record.sessionId !== undefined ? { sessionId: record.sessionId } : {},
         toolName: record.toolName,
+        ...record.observationId !== undefined ? { observationId: record.observationId } : {},
         verdict: record.verdict,
         ...record.reason !== undefined ? { reason: record.reason } : {},
         ...record.modelTier !== undefined ? { modelTier: record.modelTier } : {},

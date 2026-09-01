@@ -209,6 +209,7 @@ export async function maybeVerifyAction(
   deps.auditor.recordVerification({
     ...exec.agent !== undefined ? { sessionId: String(exec.agent.session.id) } : {},
     toolName,
+    ...deps.previousShotId !== undefined ? { observationId: deps.previousShotId } : {},
     verdict: verdict.verdict,
     reason: verdict.reason,
     ...verdict.tier !== undefined ? { modelTier: verdict.tier } : {},

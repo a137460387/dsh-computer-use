@@ -191,3 +191,35 @@ describe('click_at pre-click preview', () => {
     expect(calls).toEqual(['click'])
   })
 })
+
+describe('click_at verification audit', () => {
+  const clickArgs = { x: 10, y: 20, screenshotWidth: 1280, screenshotHeight: 720 }
+
+  it('records the verification verdict with the basis observationId', async () => {
+    const runtime = {
+      screenShot: vi.fn().mockResolvedValue(shotOf()),
+      clickAt: vi.fn().mockResolvedValue({ success: true, durationMs: 4 }),
+    }
+    const base = depsOf({ actionVerification: 'always', actionVerificationSettleMs: 0, clickPreview: false })
+    const recordVerification = vi.fn()
+    const deps = {
+      ...base,
+      auditor: { ...base.auditor, recordVerification },
+      vision: { verifyActionEffect: vi.fn().mockResolvedValue({ verdict: 'yes', reason: 'button pressed', tier: 'flash' }) },
+      previousShot: { data: new Uint8Array([1, 2, 3]), width: 1280, height: 720, dhash: '0000000000000000' },
+      previousShotId: 'obs-base',
+    } as unknown as ToolDeps
+    const { ctx, registered } = harness(runtime)
+    registerClickAt(ctx, deps)
+
+    const result = await registered[0]!.execute(clickArgs, execOf())
+
+    expect(result.success).toBe(true)
+    expect(recordVerification).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: 'click_at',
+      observationId: 'obs-base',
+      verdict: 'yes',
+      retried: false,
+    }))
+  })
+})

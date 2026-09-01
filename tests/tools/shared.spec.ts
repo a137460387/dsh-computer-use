@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { HIGH_RISK_MARKER, MEDIUM_RISK_MARKER } from '../../src/answerer.ts'
-import { StepCounter, isHighRiskHotkey, isSameHotkey, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
+import { StepCounter, isHighRiskHotkey, isSameHotkey, maybeVerifyAction, normalizeHotkey, requestApproval, type ToolDeps } from '../../src/tools/shared.ts'
 import { testConfig } from '../helpers.ts'
 
 describe('normalizeHotkey', () => {
@@ -203,5 +203,36 @@ describe('StepCounter.count', () => {
     counter.note('fresh_session')
     expect(counter.count('fresh_session')).toBe(2)
     expect(counter.count('another')).toBe(0)
+  })
+})
+
+describe('maybeVerifyAction', () => {
+  /** A context whose computerUse service serves the scripted after-capture. */
+  function verifyCtx(after: Record<string, unknown>): Context {
+    const runtime = { screenShot: vi.fn().mockResolvedValue(after) }
+    return { get: (name: string) => (name === 'computerUse' ? runtime : undefined) } as unknown as Context
+  }
+
+  it('records the verification verdict with the basis observationId', async () => {
+    const ctx = verifyCtx({ observationId: 'obs-after', data: new Uint8Array([4, 5, 6]), width: 1280, height: 720 })
+    const base = depsOf({ actionVerification: 'always', actionVerificationSettleMs: 0 })
+    const recordVerification = vi.fn()
+    const deps = {
+      ...base,
+      auditor: { ...base.auditor, recordVerification },
+      vision: { verifyActionEffect: vi.fn().mockResolvedValue({ verdict: 'yes', reason: 'text appeared', tier: 'flash' }) },
+      previousShot: { data: new Uint8Array([1, 2, 3]), width: 1280, height: 720, dhash: '0000000000000000' },
+      previousShotId: 'obs-base',
+    } as unknown as ToolDeps
+
+    const note = await maybeVerifyAction(ctx, deps, execOf(session()), 'type_text', 'type 5 characters into the focused window')
+
+    expect(note).toContain('Semantic verification confirmed the effect')
+    expect(recordVerification).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: 'type_text',
+      observationId: 'obs-base',
+      verdict: 'yes',
+      retried: false,
+    }))
   })
 })
