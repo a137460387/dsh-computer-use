@@ -61,7 +61,9 @@ export type { RiskTier }
  * `ctx.approval.request` with the tier marker embedded in the reason:
  * interactive sessions confirm there, while never-approval (Full access)
  * sessions reject deterministically — that rejection surfaces as
- * configuration guidance instead of a bare "rejected".
+ * configuration guidance instead of a bare "rejected". Every seam refusal
+ * (rejected, unavailable, cancelled) writes an `answer/refused` audit line
+ * before the tool error is thrown.
  * @param ctx - context carrying the approval service.
  * @param deps - bundle wiring carrying the policy and the audit sink.
  * @param exec - the tool execution being decided.
@@ -98,12 +100,14 @@ export async function requestApproval(
       return
     case 'rejected':
     case 'unavailable':
+      deps.auditor.recordAnswerRefusal({ sessionId, toolName, tier, outcome })
       throw new Error(
         `dsh-computer-use: ${toolName} needs interactive approval (tier=${tier}) but none was granted; `
         + 'never-approval (Full access) sessions refuse it without prompting — '
         + 'switch the session to Workspace Write and retry',
       )
     case 'cancelled':
+      deps.auditor.recordAnswerRefusal({ sessionId, toolName, tier, outcome })
       throw new Error(`dsh-computer-use: ${toolName} approval was cancelled`)
     default:
       assertNever(outcome, 'approval outcome')

@@ -102,6 +102,42 @@ describe('createAuditor', () => {
     expect(lines[0]?.timestamp).toEqual(expect.any(String))
   })
 
+  it('records an approval-seam refusal with the outcome that stopped the action', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordAnswerRefusal({ sessionId: 'sess-1', toolName: 'hotkey', tier: 'high', outcome: 'rejected' })
+    auditor.recordAnswerRefusal({ sessionId: 'sess-1', toolName: 'click_at', tier: 'medium', outcome: 'cancelled' })
+
+    const lines = await waitForLines(config.auditLogPath, 2)
+    expect(lines[0]).toMatchObject({
+      kind: 'answer/refused', sessionId: 'sess-1', toolName: 'hotkey',
+      tier: 'high', outcome: 'rejected',
+    })
+    expect(lines[0]?.timestamp).toEqual(expect.any(String))
+    expect(lines[1]).toMatchObject({ toolName: 'click_at', tier: 'medium', outcome: 'cancelled' })
+  })
+
+  it('records a freshness-gate refusal, naming the action and the stale reference', async () => {
+    const ctx = new Context()
+    const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
+    const auditor = createAuditor(ctx, config)
+
+    auditor.recordActionRefusal({
+      actionType: 'click_at', observationId: 'obs-1', reason: 'expired', ageMs: 31_200, ttlMs: 30_000,
+    })
+    auditor.recordActionRefusal({ actionType: 'scroll', observationId: 'obs-2', reason: 'unknown' })
+
+    const lines = await waitForLines(config.auditLogPath, 2)
+    expect(lines[0]).toMatchObject({
+      kind: 'action/refused', actionType: 'click_at', observationId: 'obs-1',
+      reason: 'expired', ageMs: 31_200, ttlMs: 30_000,
+    })
+    // An unknown reference carries no age facts; the absent fields are omitted.
+    expect(Object.keys(lines[1] ?? {}).sort()).toEqual(['actionType', 'kind', 'observationId', 'reason', 'timestamp'])
+  })
+
   it('records lifecycle lines keyed by event name', async () => {
     const ctx = new Context()
     const config = testConfig({ auditLogPath: join(workRoot, `audit-${Math.random().toString(36).slice(2)}.log`) })
@@ -252,6 +288,54 @@ describe('createAuditor', () => {
 
     await vi.waitFor(() => { expect(auditor.writeHealth().status).toBe('error') }, { timeout: 5000, interval: 25 })
     expect(auditor.writeHealth().error).toEqual(expect.any(String))
+  })
+
+  it('warns once per failure episode when audit writes cannot land', async () => {
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const dirPath = join(workRoot, `warn-dir-${Math.random().toString(36).slice(2)}.log`)
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dirPath, { recursive: true })
+    const config = testConfig({ auditLogPath: dirPath })
+    const auditor = createAuditor(ctx, config)
+
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'doomed-1', atMs: Date.now() })
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'doomed-2', atMs: Date.now() })
+
+    await vi.waitFor(() => { expect(auditor.writeHealth().status).toBe('error') }, { timeout: 5000, interval: 25 })
+    await vi.waitFor(() => { expect(warn).toHaveBeenCalled() }, { timeout: 5000, interval: 25 })
+    // Let every queued step drain: the episode announces itself once, later
+    // failures inside the same episode stay silent (the sweep keeps its own
+    // pre-existing failure warning, a separate subject).
+    await new Promise(resolve => setTimeout(resolve, 100))
+    const episodeWarns = warn.mock.calls
+      .filter(([message]) => String(message).includes('audit write failed'))
+    expect(episodeWarns).toHaveLength(1)
+    expect(episodeWarns[0]?.[0]).toMatch(/audit write failed.*gap until writes recover/s)
+  })
+
+  it('notes recovery through the host logger when writes land after a failure', async () => {
+    const ctx = new Context()
+    const info = vi.spyOn(ctx.logger, 'info')
+    // A FILE where the log's directory belongs makes mkdir (and the append)
+    // fail; removing it lets the next append re-run ensureDir and land.
+    const blockPath = join(workRoot, `block-${Math.random().toString(36).slice(2)}`)
+    await writeFile(blockPath, 'blocker')
+    const auditLogPath = join(blockPath, 'audit.log')
+    const config = testConfig({ auditLogPath })
+    const auditor = createAuditor(ctx, config)
+
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'doomed', atMs: Date.now() })
+    await vi.waitFor(() => { expect(auditor.writeHealth().status).toBe('error') }, { timeout: 5000, interval: 25 })
+
+    await rm(blockPath)
+    ctx.emit('computer-use/before-action', { action: 'scroll', detail: 'lands', atMs: Date.now() })
+
+    const lines = await waitForLines(auditLogPath, 1)
+    expect(lines[0]).toMatchObject({ detail: 'lands' })
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(expect.stringMatching(/audit writes recovered/))
+    }, { timeout: 5000, interval: 25 })
   })
 
   it('reports write health error when a retention sweep rewrite fails', async () => {

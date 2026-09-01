@@ -36,6 +36,7 @@ import {
 import type {
   ActionResult,
   ClickAtRequest,
+  ComputerUseActionType,
   DisplayInfo,
   HotkeyRequest,
   ScreenShot,
@@ -630,11 +631,18 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     })
   }
 
-  /** Refuse stale or unknown observation references with a clear reason. */
-  private assertObservationFresh(id: ObservationId | undefined): void {
+  /**
+   * Refuse stale or unknown observation references with a clear reason;
+   * every refusal writes an `action/refused` audit line, since the refused
+   * action never reaches the before/after events.
+   * @param id - the observation reference to check, when the action has one.
+   * @param action - the action being gated, named on the refusal line.
+   */
+  private assertObservationFresh(id: ObservationId | undefined, action: ComputerUseActionType): void {
     if (id === undefined) return
     const stored = this.observations.get(id)
     if (stored === undefined) {
+      this.auditor.recordActionRefusal({ actionType: action, observationId: String(id), reason: 'unknown' })
       throw new Error(
         `dsh-computer-use: unknown or expired ObservationId "${id}"; `
         + 'call screen_shot first and reference the id it returned',
@@ -643,6 +651,13 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
     const ageMs = Date.now() - stored.capturedAtMs
     if (ageMs > this.config.observationTtlMs) {
       this.expireObservation(id)
+      this.auditor.recordActionRefusal({
+        actionType: action,
+        observationId: String(id),
+        reason: 'expired',
+        ageMs,
+        ttlMs: this.config.observationTtlMs,
+      })
       throw new Error(
         `dsh-computer-use: ObservationId "${id}" expired (${Math.round(ageMs)} ms old; `
         + `freshness window ${this.config.observationTtlMs} ms); capture a fresh screenshot first`,
@@ -701,7 +716,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
   clickAt(request: ClickAtRequest): Promise<ActionResult> {
     return this.enqueue(async () => {
-      this.assertObservationFresh(request.basedOnObservationId)
+      this.assertObservationFresh(request.basedOnObservationId, 'click_at')
       return this.runAction('click_at', request.basedOnObservationId, `x=${request.x} y=${request.y} basis=${request.screenshotWidth}x${request.screenshotHeight}`, () => this.callSidecar<ActionResult>('click_at', {
         x: request.x,
         y: request.y,
@@ -714,7 +729,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
   typeText(request: TypeTextRequest): Promise<ActionResult> {
     return this.enqueue(async () => {
-      this.assertObservationFresh(request.basedOnObservationId)
+      this.assertObservationFresh(request.basedOnObservationId, 'type_text')
       return this.runAction('type_text', request.basedOnObservationId, `chars=${request.text.length}`, () => this.callSidecar<ActionResult>('type_text', {
         text: request.text,
         ...request.basedOnObservationId !== undefined ? { basedOnObservationId: request.basedOnObservationId } : {},
@@ -724,7 +739,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
   scroll(request: ScrollRequest): Promise<ActionResult> {
     return this.enqueue(async () => {
-      this.assertObservationFresh(request.basedOnObservationId)
+      this.assertObservationFresh(request.basedOnObservationId, 'scroll')
       return this.runAction('scroll', request.basedOnObservationId, `direction=${request.direction} amount=${request.amount}`, () => this.callSidecar<ActionResult>('scroll', {
         direction: request.direction,
         amount: request.amount,
@@ -735,7 +750,7 @@ export default class McpComputerUseProvider extends ComputerUseRuntime {
 
   hotkey(request: HotkeyRequest): Promise<ActionResult> {
     return this.enqueue(async () => {
-      this.assertObservationFresh(request.basedOnObservationId)
+      this.assertObservationFresh(request.basedOnObservationId, 'hotkey')
       return this.runAction('hotkey', request.basedOnObservationId, `keys=${request.keys.join('+')}`, () => this.callSidecar<ActionResult>('hotkey', {
         keys: [...request.keys],
         ...request.basedOnObservationId !== undefined ? { basedOnObservationId: request.basedOnObservationId } : {},

@@ -26,6 +26,8 @@ export function noOpAuditor(): Auditor {
     recordDanger: () => {},
     recordSensitiveWindow: () => {},
     recordAutoApproval: () => {},
+    recordAnswerRefusal: () => {},
+    recordActionRefusal: () => {},
     recordVerification: () => {},
     recordLifecycle: () => {},
     sweepRetention: () => Promise.resolve(),

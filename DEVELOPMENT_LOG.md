@@ -876,3 +876,116 @@ explicitTier?)` 返回档位 + 解析后的路由 + `overridden` 标志。两个
    18 处未覆盖语句逐行比对无新增），本轮未扩。
 5. 档位配置指向无 image 能力的路由时，`ctx.llm` 会把图片投影为占位文本
    （既有行为），路由层不做额外能力校验——改派是部署的显式选择。
+
+## Phase 9 交付结论（拒绝审计 + 写入失败告警，2026-09-01）
+
+### P9-1：动机与范围
+
+Known Limitation ④（README Known Limitations 末条的设计张力清单）记着
+「TTL 过期与审批缝拒绝的调用不留审计行」，待办4遗留项⑤记着「审计写入
+本身失败无告警」。本轮打包两项——都在审计子系统内，评审与门禁合并一轮。
+探查确认的三个缺口：
+
+1. 审批拒绝不留痕：`requestApproval` 的自动放行写
+   `answer/auto-allowed`，但 `ctx.approval.request` 的
+   `rejected`/`unavailable`/`cancelled` 三种结局直接抛错，插件侧 JSONL
+   审计对「为什么没执行」完全空白（宿主 ApprovalService 的
+   `approval/asked`/`approval/decided` 会话事件是另一条流，且 never 会话
+   在分发 waterfall 之前就被宿主 `decide()` 拒绝，连会话事件也不产生）。
+2. TTL 拒绝不留痕：`assertObservationFresh` 在 `runAction` 之前抛，
+   被拒动作连 before/after 事件都没有——审计行、事件双空白。
+3. 写入失败无告警：`AuditLog.append` 的 I/O 失败在队列尾部吞掉，唯一
+   可观察面是 `writeHealth()`（就绪度清单的被动快照），磁盘满/权限类
+   故障进入盲区。
+
+### P9-2：设计
+
+**两个新审计行类型**（不合并成单 kind + reason 字段）：既有审计风格按
+领域族分 kind——`action/*`、`danger/*`、`answer/*`、`verification/*`、
+`lifecycle/*`——族内用不同 kind 区分事件（`danger/blocked` vs
+`danger/sensitive-window`、`lifecycle/*` 七种），从不用单一 reason 字段
+收编跨族事件。两个拒绝分属两族：审批拒绝属 `answer/*`（与
+`answer/auto-allowed` 成对），新鲜度拒绝属 `action/*`（与 before/after
+成对，补全一次动作的完整经历）；合并会破坏族前缀，复盘时按族 grep 也不
+成立。字段设计：
+
+- `answer/refused`：timestamp / sessionId / toolName / tier / outcome。
+  outcome 复用缝结局词汇 `rejected` | `unavailable` | `cancelled`——
+  cancelled 一并留痕：它和拒绝同属「没执行」的终局，复盘同样要答案。
+- `action/refused`：timestamp / actionType / observationId / reason
+  （`unknown`：从未捕获或已过期；`expired`：当场判定超龄），`expired`
+  附 `ageMs` / `ttlMs`。无 sessionId——provider 层结构性不感知会话。
+
+**写入失败告警——宿主 logger 的 episode 级告警**：
+`AuditLog.noteWriteOutcome` 在写健康状态跃迁时发声——首次失败 `warn`
+（"audit write failed (...); the audit trail has a gap until writes
+recover"），从失败恢复 `info`（"audit writes recovered after a
+failure"）；同一 episode 内的重复失败保持沉默，避免每条失败动作刷一次
+日志。不选更重方案的理由：
+
+- 独立 `.error` 文件：磁盘满/权限类失败与审计文件同目录同卷，同一失败
+  域里写两份没有意义；只多规避「审计路径本身被占」一种失败，却引入新
+  磁盘产物和 retention 清理义务。
+- 弹窗 / 外部 webhook：为一个诊断事件引入新出站面、配置项与失败模式，
+  重量与收益不成比例。
+- 宿主 logger 是本插件既有失败告警面（retention sweep、sidecar 退出、
+  健康检查、预览失败全走 `ctx.logger.warn`），且与审计文件是不同写入
+  链路——一致性和失败域分离都满足。
+
+**不加配置开关**：既有审计族（danger、sensitive-window、auto-allowed、
+lifecycle）全无开关，拒绝审计同为安全可观测性，无条件记录；告警走宿主
+日志，也没有静音需求。
+
+### P9-3：生产行为零改变自证
+
+- 审批判定：`consultAnswerer` 窗口/配额状态机、`ctx.approval.request`
+  调用、outcome→错误映射逐字节未动；审计调用插在既有两处 `throw` 的
+  前一行，抛出的错误文案原文未改。
+- TTL 校验：`assertObservationFresh` 的两个判定条件（map 查询、
+  `ageMs > observationTtlMs`）、lazy 过期调用顺序、错误文案逐字节未动；
+  仅追加尾部 `action` 形参（四个调用点传各自字面量），纯为审计行命名。
+- 写入链路：append 失败仍在队列尾部吞掉，串行队列、retention sweep、
+  `writeHealth` 语义全不变，只在健康跃迁时多一条 logger 输出。
+- 模型可见工具零变化：8 个工具的 `defineTool()` 名称/参数/output
+  schema 无任何改动；`src/tools/` 下本轮唯一改动是 `shared.ts` 的
+  `requestApproval`（共享安全接线，非工具定义文件），未触及任何
+  `defineTool()` 调用。
+- 无新增配置字段；版本号不动（sidecar 协议无变化，仍 0.1.3）。
+
+### P9-4：验证结果（2026-09-01）
+
+- `npx tsc --noEmit` 零错误。
+- `vitest run` 219/219（213 旧 + 6 新：auditor.spec 4——两种新行各一、
+  episode 告警一、写入恢复一；provider-mcp.spec 2——expired 与 unknown
+  两种 TTL 拒绝审计；另在 shared.spec 既有 3 个拒绝用例上追加
+  `recordAnswerRefusal` 断言、2 个放行用例上追加未调用断言）。
+- 覆盖率（分母不变，仍 definition/diagnostics/security/vision 四族）：
+  语句 95.39%（基线 95.30%）/ 分支 87.03%（86.43%）/ 函数 98%（97.95%）/
+  行 96.04%（95.95%）——四项均不低于基线。auditor.ts 未覆盖两行
+  （402/418）与基线（328/344）一一对应，是两处 sweep 失败 catch 的既有
+  不可测分支，仅行号平移。
+- `python -m unittest discover -s tests/python` 63/63（sidecar 未动）。
+
+### P9-5：Known Limitation ④ 更新
+
+README Known Limitations 设计张力条改写：删去「TTL-expired and
+seam-refused calls leave no audit entry」，改为「seam 拒绝与 TTL/未知
+引用拒绝已留审计（`answer/refused`、`action/refused`）」，并精确记录
+剩余盲区：sidecar 层动作拒绝（暂停控制等）只有 `action/after
+success: false` 行、无拒绝原因。同步更新 Purpose、审批语义 Key fact、
+Model Experience 守卫清单，Troubleshooting 新增 "Audit log" 条目
+（写入失败的症状与处置）。
+
+### P9-6：只记录（本轮未动）
+
+1. **sidecar 层拒绝原因仍不入审计行**：暂停控制、以及 sidecar 自身新鲜度
+   检查拒绝的引用，只留 `action/after success: false`；补齐需给
+   after-action 事件加 reason 字段，涉及事件面，另行立项。
+2. **screen_shot 的 sidecar 失败路径只发 before-action、无 after-action**
+   （既有不对称），本轮未动。
+3. `getObservation` 的过期路径（`peek_cursor` 读 basis）返回 undefined，
+   是读取而非动作拒绝，不审计。
+4. 步数上限（`maxSteps`）与断路器的动作拒绝仍无专门审计行（本轮范围
+   只覆盖审批与新鲜度拒绝）。
+5. 拒绝审计与写入失败告警均无配置开关（理由见 P9-2）；未来若部署提出
+   静音需求，再按 `actionVerification` 风格的枚举项评估。

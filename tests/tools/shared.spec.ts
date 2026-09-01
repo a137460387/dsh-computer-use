@@ -90,6 +90,8 @@ function depsOf(overrides: Record<string, unknown> = {}): ToolDeps {
       recordDanger: vi.fn(),
       recordSensitiveWindow: vi.fn(),
       recordAutoApproval: vi.fn(),
+      recordAnswerRefusal: vi.fn(),
+      recordActionRefusal: vi.fn(),
       recordLifecycle: vi.fn(),
       sweepRetention: vi.fn(),
     },
@@ -110,6 +112,7 @@ describe('requestApproval', () => {
     expect(deps.auditor.recordAutoApproval).toHaveBeenCalledWith({
       sessionId, toolName: 'click_at', tier: 'medium',
     })
+    expect(deps.auditor.recordAnswerRefusal).not.toHaveBeenCalled()
   })
 
   it('consults the seam with the medium marker once the quota is exhausted', async () => {
@@ -136,15 +139,20 @@ describe('requestApproval', () => {
     expect(request).toHaveBeenCalledTimes(1)
     expect(request.mock.calls[0]?.[0].reason).toBe(`${HIGH_RISK_MARKER} press r+win`)
     expect(deps.auditor.recordAutoApproval).not.toHaveBeenCalled()
+    expect(deps.auditor.recordAnswerRefusal).not.toHaveBeenCalled()
   })
 
   it('fails closed with never-mode guidance when the seam rejects', async () => {
     const { ctx } = ctxApproving('rejected')
     const deps = depsOf()
+    const sessionId = session()
 
-    await expect(requestApproval(ctx, deps, execOf(session()), 'hotkey', 'high', 'press r+win')).rejects.toThrow(
+    await expect(requestApproval(ctx, deps, execOf(sessionId), 'hotkey', 'high', 'press r+win')).rejects.toThrow(
       /needs interactive approval \(tier=high\).*never-approval \(Full access\).*Workspace Write/s,
     )
+    expect(deps.auditor.recordAnswerRefusal).toHaveBeenCalledWith({
+      sessionId, toolName: 'hotkey', tier: 'high', outcome: 'rejected',
+    })
   })
 
   it('fails closed with never-mode guidance when no answerer is available', async () => {
@@ -158,14 +166,22 @@ describe('requestApproval', () => {
       /needs interactive approval \(tier=medium\).*never-approval \(Full access\).*Workspace Write/s,
     )
     expect(request).toHaveBeenCalledTimes(1)
+    expect(deps.auditor.recordAnswerRefusal).toHaveBeenCalledTimes(1)
+    expect(deps.auditor.recordAnswerRefusal).toHaveBeenCalledWith({
+      sessionId: String(exec.agent?.session.id), toolName: 'click_at', tier: 'medium', outcome: 'unavailable',
+    })
   })
 
   it('surfaces cancellations as their own error', async () => {
     const { ctx } = ctxApproving('cancelled')
     const deps = depsOf()
+    const sessionId = session()
 
-    await expect(requestApproval(ctx, deps, execOf(session()), 'hotkey', 'high', 'press r+win'))
+    await expect(requestApproval(ctx, deps, execOf(sessionId), 'hotkey', 'high', 'press r+win'))
       .rejects.toThrow(/approval was cancelled/)
+    expect(deps.auditor.recordAnswerRefusal).toHaveBeenCalledWith({
+      sessionId, toolName: 'hotkey', tier: 'high', outcome: 'cancelled',
+    })
   })
 
   it('refuses an execution without an agent', async () => {

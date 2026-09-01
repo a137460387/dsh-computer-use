@@ -1,19 +1,21 @@
 /**
  * Behavior audit: every action appends one JSON line to the deployment's
  * audit log (timestamp, session, action type, coordinates/detail, hashes,
- * outcome), high-risk danger blocks are logged separately, and a retention
- * sweep prunes log lines and archived screenshots older than the configured
- * window. Screenshot ARCHIVE bytes and breaker HASH fingerprints stay in
- * separate stores by design.
+ * outcome), high-risk danger blocks are logged separately, approval-seam and
+ * freshness-gate refusals append their own lines, and a retention sweep
+ * prunes log lines and archived screenshots older than the configured window.
+ * A failed write never breaks the action flow; it announces itself once per
+ * failure episode through the host logger. Screenshot ARCHIVE bytes and
+ * breaker HASH fingerprints stay in separate stores by design.
  * @module dsh-computer-use/security/auditor
  */
 
 import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, LoggerService } from '@deepseek-ai/cordis'
 import type { RiskTier } from '../answerer.ts'
 import type { ComputerUseConfig } from '../config.ts'
-import type { AfterActionEvent, BeforeActionEvent } from '../definition/index.ts'
+import type { AfterActionEvent, BeforeActionEvent, ComputerUseActionType } from '../definition/index.ts'
 import type { VisionTier } from '../vision/router.ts'
 
 /** Extra audit facts for one danger-intercepted payload. */
@@ -46,6 +48,32 @@ export interface AutoApprovalAuditRecord {
   readonly toolName: string
   /** Risk tier of the auto-granted action. */
   readonly tier: RiskTier
+}
+
+/** Extra audit facts for one approval-seam refusal of an escalated action. */
+export interface AnswerRefusalAuditRecord {
+  /** Session whose action was refused. */
+  readonly sessionId: string
+  /** The tool whose action was refused. */
+  readonly toolName: string
+  /** Risk tier of the refused action. */
+  readonly tier: RiskTier
+  /** The seam outcome that stopped the action. */
+  readonly outcome: 'rejected' | 'unavailable' | 'cancelled'
+}
+
+/** Extra audit facts for one action refused by the observation freshness gate. */
+export interface ActionRefusalAuditRecord {
+  /** The action that was refused. */
+  readonly actionType: ComputerUseActionType
+  /** The stale observation reference the action carried. */
+  readonly observationId: string
+  /** `unknown`: never captured or already expired; `expired`: refused past the TTL. */
+  readonly reason: 'unknown' | 'expired'
+  /** Reference age in milliseconds at refusal time; present exactly for `expired`. */
+  readonly ageMs?: number
+  /** The configured freshness window in milliseconds; present exactly for `expired`. */
+  readonly ttlMs?: number
 }
 
 /** Extra audit facts for one post-action semantic verification verdict. */
@@ -121,6 +149,14 @@ export interface Auditor {
    * plugin line because the ApprovalService logs its own session events.
    */
   recordAutoApproval(record: AutoApprovalAuditRecord): void
+  /**
+   * Log one approval-seam refusal; the plugin-side line covers what the
+   * ApprovalService session events cannot — refusals resolved before the
+   * seam dispatch and the tool-level cancellation.
+   */
+  recordAnswerRefusal(record: AnswerRefusalAuditRecord): void
+  /** Log one action refused by the observation freshness gate. */
+  recordActionRefusal(record: ActionRefusalAuditRecord): void
   /** Log one post-action semantic verification verdict (advisory channel). */
   recordVerification(record: VerificationAuditRecord): void
   /** Log one lifecycle transition (mount, sidecar lifetime, pause/resume). */
@@ -141,18 +177,35 @@ class AuditLog {
   private dirEnsured = false
   private lastWrite: AuditWriteHealth = { status: 'none' }
 
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly logger: Pick<LoggerService, 'info' | 'warn'>,
+  ) {}
 
   /** Health of the most recent queued write attempt. */
   writeHealth(): AuditWriteHealth {
     return this.lastWrite
   }
 
-  /** Record one write attempt outcome; later attempts overwrite it. */
+  /**
+   * Record one write attempt outcome; later attempts overwrite it. Health
+   * transitions announce themselves once per episode through the host
+   * logger — a failed append is the one audit fact the audit file itself
+   * can no longer be trusted to carry.
+   */
   noteWriteOutcome(error: unknown): void {
+    const previous = this.lastWrite.status
     this.lastWrite = error === undefined
       ? { status: 'ok', atMs: Date.now() }
       : { status: 'error', atMs: Date.now(), error: String(error) }
+    if (this.lastWrite.status === 'error' && previous !== 'error') {
+      this.logger.warn(
+        `dsh-computer-use: audit write failed (${String(error)}); `
+        + 'the audit trail has a gap until writes recover',
+      )
+    } else if (this.lastWrite.status === 'ok' && previous === 'error') {
+      this.logger.info('dsh-computer-use: audit writes recovered after a failure')
+    }
   }
 
   /** Queue one JSON line; a failed append never breaks the serial chain. */
@@ -222,7 +275,7 @@ class AuditLog {
  * @returns the danger channel.
  */
 export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor {
-  const log = new AuditLog(config.auditLogPath)
+  const log = new AuditLog(config.auditLogPath, ctx.logger)
 
   ctx.on('computer-use/before-action', (event: BeforeActionEvent) => {
     log.append({
@@ -281,6 +334,27 @@ export function createAuditor(ctx: Context, config: ComputerUseConfig): Auditor 
         sessionId: record.sessionId,
         toolName: record.toolName,
         tier: record.tier,
+      })
+    },
+    recordAnswerRefusal(record: AnswerRefusalAuditRecord): void {
+      log.append({
+        kind: 'answer/refused',
+        timestamp: new Date().toISOString(),
+        sessionId: record.sessionId,
+        toolName: record.toolName,
+        tier: record.tier,
+        outcome: record.outcome,
+      })
+    },
+    recordActionRefusal(record: ActionRefusalAuditRecord): void {
+      log.append({
+        kind: 'action/refused',
+        timestamp: new Date().toISOString(),
+        actionType: record.actionType,
+        observationId: record.observationId,
+        reason: record.reason,
+        ...record.ageMs !== undefined ? { ageMs: record.ageMs } : {},
+        ...record.ttlMs !== undefined ? { ttlMs: record.ttlMs } : {},
       })
     },
     recordVerification(record: VerificationAuditRecord): void {

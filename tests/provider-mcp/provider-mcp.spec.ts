@@ -8,6 +8,7 @@ import McpComputerUseProvider, {
   computerUseBinaryPath,
   resolveSidecarLaunch,
 } from '../../src/provider-mcp/index.ts'
+import type { ActionRefusalAuditRecord } from '../../src/security/auditor.ts'
 import { noOpAuditor, testConfig } from '../helpers.ts'
 
 // existsSync is mocked module-wide so the missing-binary refusal is testable
@@ -103,6 +104,77 @@ describe('McpComputerUseProvider observation freshness', () => {
     const ctx = new Context()
     const provider = new McpComputerUseProvider(ctx, testConfig(), noOpAuditor())
     await expect(provider.getObservation(ObservationId('never'))).resolves.toBeUndefined()
+  })
+})
+
+describe('McpComputerUseProvider refusal audit', () => {
+  interface ObservationFacts {
+    observationId: string
+    path: string
+    width: number
+    height: number
+    bytes: number
+    dhash: string
+    capturedAtMs: number
+  }
+
+  /** Reach the provider's private registration path for TTL testing. */
+  function register(provider: McpComputerUseProvider, facts: ObservationFacts, data: Uint8Array): void {
+    const internal = provider as unknown as {
+      registerObservation(facts: ObservationFacts, data: Uint8Array): void
+    }
+    internal.registerObservation(facts, data)
+  }
+
+  function factsOf(capturedAtMs: number): ObservationFacts {
+    return {
+      observationId: 'obs-1', path: '/tmp/obs-1.jpg', width: 100, height: 80,
+      bytes: 3, dhash: '0000000000000000', capturedAtMs,
+    }
+  }
+
+  /** An audit sink capturing refusal records; everything else drops. */
+  function recordingAuditor(): { auditor: ReturnType<typeof noOpAuditor>; refusals: ActionRefusalAuditRecord[] } {
+    const refusals: ActionRefusalAuditRecord[] = []
+    return {
+      auditor: { ...noOpAuditor(), recordActionRefusal: record => { refusals.push(record) } },
+      refusals,
+    }
+  }
+
+  it('audits an expired-reference refusal and still throws the original error', async () => {
+    const ctx = new Context()
+    const { auditor, refusals } = recordingAuditor()
+    const provider = new McpComputerUseProvider(ctx, testConfig({ observationTtlMs: 1000 }), auditor)
+
+    // Backdate the capture past the TTL: the freshness check refuses lazily
+    // (the expiry timer has not fired yet), so the refusal carries age facts.
+    register(provider, factsOf(Date.now() - 1500), new Uint8Array([1, 2, 3]))
+
+    await expect(provider.clickAt({
+      x: 10, y: 20, screenshotWidth: 100, screenshotHeight: 80,
+      basedOnObservationId: ObservationId('obs-1'),
+    })).rejects.toThrow(/expired/)
+
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]).toMatchObject({
+      actionType: 'click_at', observationId: 'obs-1', reason: 'expired', ttlMs: 1000,
+    })
+    expect(refusals[0]?.ageMs).toBeGreaterThanOrEqual(1500)
+  })
+
+  it('audits an unknown-reference refusal without the age facts', async () => {
+    const ctx = new Context()
+    const { auditor, refusals } = recordingAuditor()
+    const provider = new McpComputerUseProvider(ctx, testConfig({ observationTtlMs: 1000 }), auditor)
+
+    await expect(provider.scroll({
+      direction: 'down', amount: 3, basedOnObservationId: ObservationId('never-seen'),
+    })).rejects.toThrow(/unknown or expired/)
+
+    expect(refusals).toEqual([
+      { actionType: 'scroll', observationId: 'never-seen', reason: 'unknown' },
+    ])
   })
 })
 
